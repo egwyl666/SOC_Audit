@@ -1,0 +1,5 @@
+# Keep the PowerShell script byte-for-byte: UTF-8 with BOM + CRLF.
+# Any EOL/encoding normalization would break Cyrillic in PowerShell 5.1
+# and change the SHA256 recorded in chain of custody.
+*.ps1 -text diff
+*.md  text eol=lf
