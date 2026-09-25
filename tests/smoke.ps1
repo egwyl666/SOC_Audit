@@ -31,6 +31,11 @@ if ($steps.Count -lt 30) { $fail += "лише $($steps.Count) кроків" }
 $visPath = Join-Path $case.FullName '02_system\event_visibility.csv'
 $vis = @(); if (Test-Path -LiteralPath $visPath) { $vis = @(Import-Csv -LiteralPath $visPath) }
 if ($vis.Count -lt 20) { $fail += "event_visibility.csv: лише $($vis.Count) категорій" }
+$pePath = Join-Path $case.FullName '02_system\persistence_extended.csv'
+$pe = @(); if ((Test-Path -LiteralPath $pePath) -and -not ((Get-Content -LiteralPath $pePath -TotalCount 1) -like '#*')) { $pe = @(Import-Csv -LiteralPath $pePath) }
+if ($pe.Count -lt 3) { $fail += "persistence_extended.csv: лише $($pe.Count) рядків (очікувались хоча б LSA-пакети)" }
+Write-Host '--- Розширена персистентність'
+$pe | Format-Table Category, Name, Status, Severity, Signer -AutoSize | Out-String -Width 220 | Write-Host
 Write-Host '--- Видимість за категоріями подій'
 $vis | Format-Table Category, EventIds, Status, Events24h -AutoSize | Out-String -Width 220 | Write-Host
 Write-Host '--- Сліди запуску (кількість рядків)'

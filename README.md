@@ -2,7 +2,7 @@
 
 English | [Українська](README.uk.md)
 
-**SOC Live Response Collector v1.7.2** — a single script for evidence collection and first-pass analysis of a Windows host
+**SOC Live Response Collector v1.9.0** — a single script for evidence collection and first-pass analysis of a Windows host
 (replaces the old main audit + `fwlog.ps1` + `filesinter.ps1`). Aligned with **NIST SP 800-86**.
 
 The script collects volatile data, persistence, event logs, `pfirewall.log` and file artifacts, checks security
@@ -52,8 +52,9 @@ For a real incident, add your IOCs and write the results to an external drive:
 [Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24 -NamePatterns '*evil*' -IocIPs '203.0.113.5' -OutRoot 'E:\SOC_Evidence'
 ```
 
-> Note: without your own IOCs the script uses the test KMSAuto masks (a banner in the report says so). Record the
-> printed SHA256 in the ticket — it identifies the exact version that was run.
+> Note: without IOCs the script runs as a host audit: everything is collected, only the search by name masks,
+> hashes and IPs is skipped (a banner in the report says so). If `-OutRoot` is on the system drive, the console and
+> the report warn about it. Record the printed SHA256 in the ticket — it identifies the exact version that was run.
 
 ### 2.1 Via `-File` — recommended
 
@@ -114,16 +115,19 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 
 | Parameter | Default | Description |
 |---|---|---|
-| `-NamePatterns` | `*KMS*`, `*activ*`, `*SECOPatcher*` | File name masks (disk search, LNK, BAM, Prefetch, Recycle Bin, browser history) |
-| `-KnownPaths` | KMSAuto paths | Specific files/folders: hash, signature, MAC before/after, Zone.Identifier |
-| `-IocSha256` | KMSAuto++ and archive hashes | Matched against files, processes, services, Sysmon |
+| `-NamePatterns` | — | File name masks (disk search, LNK, BAM, Prefetch, Recycle Bin, browser history) |
+| `-KnownPaths` | — | Specific files/folders: hash, signature, MAC before/after, Zone.Identifier |
+| `-IocSha256` | — | Matched against files, processes, services, Sysmon |
 | `-IocSha1` | — | File SHA1s; matched against Amcache (it stores SHA1, not SHA256). Requires `-CollectHives` |
-| `-IocIPs` | `192.168.77.51`, `fe80::1a2b:…`, `10.9.0.20` | Matched against connections, ARP/NDP, pfirewall.log, RDP, 4625, KMS registry. Whole-address match only (`10.9.0.20` does not match `110.9.0.201`) |
+| `-IocIPs` | — | Matched against connections, ARP/NDP, pfirewall.log, RDP, 4625, KMS registry. Whole-address match only (`10.9.0.20` does not match `110.9.0.201`) |
 | `-SearchRoots` | all local and removable drives | Where to search for files |
 | `-ExcludeDirs` | WinSxS, DriverStore, servicing… | Path fragments to skip |
 
-> Note: **for a new case you must change the masks and IOCs.** The defaults belong to the KMSAuto test case —
-> elsewhere `*activ*` gives many false positives (Active Directory, ActiveX, Wazuh `active-response`).
+| `-TestIoc` | off | Built-in IOCs of the KMSAuto test case (for checking the tool); flags based only on mask matches are lowered to "Інфо" |
+
+> Note: **no IOCs are built in.** Without any IOC parameter the run is a host audit (configuration, logs,
+> artifacts); the disk search by masks and the USN extract are skipped. Masks are substrings: `*activ*` gives many
+> false positives (Active Directory, ActiveX, Wazuh `active-response`).
 
 ### Output location
 
@@ -152,6 +156,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache via `esentutl /vss`, Amcache parsing (step 5.10) | Deep forensics, finding deleted files by SHA1. Note: creates a shadow copy — modifies the system (recorded in custody) |
 | `-UsnJournal` | USN journal extract by masks | When you need to know when files were created/deleted. Slow |
 | `-NoZip` | No ZIP archive | When you don't need the archive |
+| `-EncryptZip` | Password-protected ZIP (AES-256) via 7-Zip; 7-Zip asks for the password in the console, so it never appears on the command line | Evidence contains browser and PowerShell history. Without 7-Zip a plain ZIP is made and a warning is shown |
 
 ---
 
@@ -212,6 +217,7 @@ The AD steps (2.10, 3.10) turn on automatically when the host is a domain contro
 | **2.9 Security settings** | SMBv1 and SMB signing, LLMNR/NetBIOS, WDigest, LSA protection (RunAsPPL), Credential Guard, LM/NTLM, UAC, RDP NLA, PowerShell v2, BitLocker, ASR rules, LAPS, Guest account, Print Spooler on a DC, firewall profiles, age of the last update |
 | **2.10 AD configuration** (DC only) | Kerberoastable and AS-REP-roastable accounts, unconstrained delegation, krbtgt password age, privileged account flags, MachineAccountQuota, password and lockout policy, privileged group members |
 | **2.11 Event visibility** | For each event category (logons, RDP, process creation, PowerShell, services, tasks, network, firewall rules, accounts and groups, audit policy, log clearing, file shares, Defender, WMI, WinRM; Kerberos and DS Access on a DC): whether it is written (auditpol / channel / policy) and how many events there actually are in the last 24 h. Status: Бачимо / Частково / НЕ бачимо / Невідомо |
+| **2.12 Extended persistence** | LSA authentication / notification / security packages, AppInit_DLLs, AppCertDlls, Winlogon (Notify, per-user Shell/Userinit), screensaver, BootExecute / SetupExecute, Active Setup, COM hijack (user CLSID overriding a system one), netsh helpers, Print Monitors, Time Providers, SilentProcessExit, running drivers without a valid signature or outside System32\drivers. Every DLL/EXE is checked for presence and signature: Microsoft = normal, no valid signature = Високо |
 | **3. Logs for the window** | 4625/4624/4648/4740/4776, account changes, log clearing, RDP (1149, 21–25, 131, 140), services (7045/4697/7040), tasks (4698–4702, TaskScheduler), firewall changes (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC executions (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 |
 | **3.9 Original logs** | Full `.evtx` export (`wevtutil epl`) with SHA256 — for re-analysis with Hayabusa / Chainsaw / EvtxECmd |
 | **3.10 AD attack signs** (DC only) | Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), privileged group changes, dangerous userAccountControl changes, 5136 (Shadow Credentials, RBCD, GPO, AdminSDHolder and domain-root ACL). First checks whether these events are audited at all |
@@ -239,7 +245,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── manifest.csv.sha256          ← manifest hash
 ├── 00_tool\                     ← copy of the script used for collection
 ├── 01_volatile\                 ← processes, network, netstat_ano.txt, sessions
-├── 02_system\                   ← system (full lists: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; event_visibility.csv; on a DC — ad_config.csv, ad_risky_accounts.csv
+├── 02_system\                   ← system (full lists: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; event_visibility.csv; persistence_extended.csv; on a DC — ad_config.csv, ad_risky_accounts.csv
 ├── 03_eventlogs\                ← log extracts; on a DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← original .evtx logs + evtx_export.csv
 ├── 04_firewall\                 ← fw_rules_all.csv (all rules, including disabled), firewall log

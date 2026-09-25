@@ -193,6 +193,26 @@ try {
         Assert-True 'Get-EventIdCount24h: неіснуючий канал -> null' ($null -eq (Get-EventIdCount24h 'SOC-Collect-No-Such/Log' @(1) $now))
     }
 
+    Test-Group 'Кроки не перезаписують $D (імена змінних без урахування регістру)'
+    $stepAsts = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].CommandElements.Count -ge 3 -and $args[0].CommandElements[0].Extent.Text -eq 'Invoke-Step' }, $true))
+    $bad = @()
+    foreach ($st in $stepAsts) {
+        $sbAst = $st.CommandElements[2]
+        $hits = @($sbAst.FindAll({ param($x)
+            ($x -is [System.Management.Automation.Language.ForEachStatementAst] -and $x.Variable.VariablePath.UserPath -ieq 'D') -or
+            ($x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.Left.VariablePath.UserPath -ieq 'D') }, $true))
+        foreach ($h in $hits) { $bad += ("{0}: рядок {1}" -f $st.CommandElements[1].Extent.Text, $h.Extent.StartLineNumber) }
+    }
+    Assert-True ("жоден крок не присвоює `$d/`$D ({0})" -f ($bad -join '; ')) ($bad.Count -eq 0)
+
+    Test-Group 'Вердикт персистентності (Get-PersistVerdict)'
+    Assert-True 'підпис Microsoft = штатно'        ((Get-PersistVerdict $true 'Valid' 'Microsoft Windows' 'Системний').Status -eq 'Штатно')
+    Assert-True 'сторонній підпис = Інфо'          ((Get-PersistVerdict $true 'Valid' 'Google LLC' 'Program Files').Severity -eq 'Інфо')
+    Assert-True 'підписано, профіль = Середньо'    ((Get-PersistVerdict $true 'Valid' 'Zoom' 'Користувацький/тимчасовий').Severity -eq 'Середньо')
+    Assert-True 'без підпису = Високо'             ((Get-PersistVerdict $true 'NotSigned' '' 'Системний').Severity -eq 'Високо')
+    Assert-True 'HashMismatch = Високо'            ((Get-PersistVerdict $true 'HashMismatch' 'Microsoft Windows' 'Системний').Severity -eq 'Високо')
+    Assert-True 'файлу немає = Середньо'           ((Get-PersistVerdict $false '' '' '').Status -eq 'Файл відсутній')
+
     Test-Group 'Видимість за категоріями подій'
     $xp = Get-EventIdXPath @(4624, 4625) ([datetime]'2026-01-01T00:00:00Z') ([datetime]'2026-01-02T00:00:00Z')
     Assert-True 'XPath: кілька ID через or' ($xp -like '*(EventID=4624 or EventID=4625) and TimeCreated*')
@@ -241,10 +261,13 @@ try {
 
     Test-Group 'Тестові IOC за замовчуванням'
     $defExpr = [scriptblock]::Create(($srcText -split "`n" | Where-Object { $_ -match '^\$UsingDefaultIoc = ' } | Select-Object -First 1))
-    $ScriptBound = @{ CaseId = 'x'; Hours = 24 }
-    . $defExpr; Assert-True 'без IOC-параметрів -> тестові' ($UsingDefaultIoc -eq $true)
-    $ScriptBound = @{ CaseId = 'x'; IocIPs = @('1.2.3.4') }
-    . $defExpr; Assert-True 'з -IocIPs -> свої' ($UsingDefaultIoc -eq $false)
+    $ScriptBound = @{ CaseId = 'x'; Hours = 24 }; $TestIoc = $false
+    . $defExpr; Assert-True 'без IOC і без -TestIoc -> не тестові' ($UsingDefaultIoc -eq $false)
+    $ScriptBound = @{ CaseId = 'x'; Hours = 24; TestIoc = $true }; $TestIoc = $true
+    . $defExpr; Assert-True '-TestIoc -> тестові' ($UsingDefaultIoc -eq $true)
+    $ScriptBound = @{ CaseId = 'x'; IocIPs = @('1.2.3.4'); TestIoc = $true }
+    . $defExpr; Assert-True '-TestIoc + -IocIPs -> свої' ($UsingDefaultIoc -eq $false)
+    $TestIoc = $false
     $downgrade = [scriptblock]::Create((Get-SourceText ('    if ($UsingDefaultIoc) {' + "`n" + '        $maskTitles') "`n    }`n") + "`n    }")
     $Flags = New-Object System.Collections.Generic.List[object]
     $Flags.Add([pscustomobject]@{ Severity = 'Середньо'; Finding = 'Активне правило: mDNS'; Evidence = 'Inbound Allow UDP/5353 svchost — Збіг з маскою IOC' })

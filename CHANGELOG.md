@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.9.0] — 2026-09-25
+
+Extended persistence.
+
+### Added
+- Step **2.12 "Розширена персистентність"** (`02_system\persistence_extended.csv`, report section 9), read-only:
+  LSA Authentication / Notification / Security Packages (T1547.002, T1547.005, T1556.002), AppInit_DLLs with
+  LoadAppInit_DLLs (T1546.010), AppCertDlls (T1546.009), Winlogon Notify / GinaDLL / Taskman and per-user Shell /
+  Userinit (T1547.004), screensaver (T1546.002), Session Manager BootExecute / SetupExecute / Execute, Active Setup
+  StubPath (T1547.014), COM hijack — a user CLSID overriding a system one (T1546.015), netsh helpers (T1546.007),
+  Print Monitors (T1547.010), Time Providers (T1547.003), SilentProcessExit MonitorProcess (T1546.012), running
+  drivers without a valid signature or outside System32\drivers.
+- Verdict per DLL/EXE by presence and signature: Microsoft signature = normal; another valid signature = Інфо
+  (Середньо if in a user folder); no valid signature = Високо; missing file = Середньо; IOC hash = Критично.
+  Високо / Середньо rows become flags.
+- Tests for the verdict logic; the smoke run checks `persistence_extended.csv`.
+
+### Fixed
+- **Event-log steps 3.1–3.10 lost their results for the report.** Inside these steps the per-event variable `$d`
+  shadowed the global data store `$D` (PowerShell variable names are case-insensitive). After the first parsed event,
+  every `$D.X = …` in that step went into the local variable: the CSV files were written correctly, but the report,
+  brute-force summary, correlation and flags saw empty data. Present since the original version; renamed to `$evd`.
+- New unit test: no `Invoke-Step` block may assign or loop over a variable named `$d` / `$D`.
+
+## [1.8.0] — 2026-09-25
+
+Safe defaults.
+
+### Changed
+- **No built-in IOCs.** `-NamePatterns`, `-KnownPaths`, `-IocSha256`, `-IocIPs` are empty by default. Without any IOC
+  parameter the run is a host audit: configuration, logs and artifacts are collected in full; the disk search by
+  masks (5.2) and the USN extract (5.9) are skipped with a note; the report shows a banner.
+- The KMSAuto test IOCs moved behind a new switch `-TestIoc` (same behaviour as before: mask-only flags lowered to
+  "Інфо" and marked "[тестова маска]").
+
+### Added
+- Warning (console, collection notes, report banner) when `-OutRoot` is on the system drive of the examined host:
+  writing evidence there can overwrite free space that still holds deleted files.
+- `-EncryptZip`: password-protected ZIP (AES-256) via 7-Zip if installed. 7-Zip asks for the password in the console,
+  so it never appears on the command line, in 4688 or in PowerShell history. Without 7-Zip a plain ZIP is created and
+  a warning is shown.
+
 ## [1.7.2] — 2026-09-25
 
 ### Fixed
