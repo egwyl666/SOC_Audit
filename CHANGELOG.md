@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.9.0] — 2026-09-25
+
+Extended persistence.
+
+### Added
+- Step **2.12 "Розширена персистентність"** (`02_system\persistence_extended.csv`, report section 9), read-only:
+  LSA Authentication / Notification / Security Packages (T1547.002, T1547.005, T1556.002), AppInit_DLLs with
+  LoadAppInit_DLLs (T1546.010), AppCertDlls (T1546.009), Winlogon Notify / GinaDLL / Taskman and per-user Shell /
+  Userinit (T1547.004), screensaver (T1546.002), Session Manager BootExecute / SetupExecute / Execute, Active Setup
+  StubPath (T1547.014), COM hijack — a user CLSID overriding a system one (T1546.015), netsh helpers (T1546.007),
+  Print Monitors (T1547.010), Time Providers (T1547.003), SilentProcessExit MonitorProcess (T1546.012), running
+  drivers without a valid signature or outside System32\drivers.
+- Verdict per DLL/EXE by presence and signature: Microsoft signature = normal; another valid signature = Інфо
+  (Середньо if in a user folder); no valid signature = Високо; missing file = Середньо; IOC hash = Критично.
+  Високо / Середньо rows become flags.
+- Tests for the verdict logic; the smoke run checks `persistence_extended.csv`.
+
 ## [1.8.0] — 2026-09-25
 
 Safe defaults.

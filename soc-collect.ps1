@@ -147,7 +147,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.8.0'
+$ToolVersion = '1.9.0'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -223,7 +223,7 @@ $DataKeys = 'TcpRaw','UdpRaw','ProcRaw','Procs','Tcp','Udp','Arp','Dns','IpAddr'
             'LocalUsers','LocalAdmins','Services','Tasks','Autoruns','WmiPersist','MpExclusions','MpStatusRows','Licensing','KmsReg',
             'FwProfiles','FwRules','Ev4625','Ev4624','OtherAuth','LogCleared','Rdp','RdpSummary','SvcEvents','TaskEvents',
             'FwEvents','MpEvents','Exec','SysmonMisc','Ps4104','FwByPort','FwBySource','FwIocRaw','FwSvcHits','KnownFiles',
-            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','UserAssist','RunMru','ShimCache','Amcache','TasksAll','FwRulesAll','PrefetchAll','MpFull','LogInventory','EventVisibility','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
+            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','UserAssist','RunMru','ShimCache','Amcache','TasksAll','FwRulesAll','PrefetchAll','MpFull','LogInventory','EventVisibility','PersistExt','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
 foreach ($k in $DataKeys) { $D[$k] = @() }
 
 $Lolbins = @('netsh.exe','wmic.exe','reg.exe','sc.exe','schtasks.exe','cscript.exe','wscript.exe','mshta.exe','rundll32.exe',
@@ -450,6 +450,16 @@ function Get-EffPathClass {   # як Get-PathClass, але підпапки C:\W
     $bi = Get-BinInfo $Path
     if ($bi -and $bi.Exists -and $bi.Sig -eq 'Valid' -and $bi.Signer -match '^Microsoft ') { return 'Windows (підпис Microsoft)' }
     return $cls   # непідписане в C:\Windows\<папка> (як KMSAutoS) лишається підозрілим
+}
+function Get-PersistVerdict {   # вердикт для DLL/EXE у точці персистентності: за наявністю файлу і підписом
+    param([bool]$Exists, [string]$Sig, [string]$Signer, [string]$PathClass)
+    if (-not $Exists) { return [pscustomobject]@{ Status = 'Файл відсутній'; Severity = 'Середньо' } }
+    if ($Sig -eq 'Valid' -and $Signer -match '^Microsoft ') { return [pscustomobject]@{ Status = 'Штатно'; Severity = '' } }
+    if ($Sig -eq 'Valid') {
+        if ($PathClass -eq 'Користувацький/тимчасовий') { return [pscustomobject]@{ Status = 'Підписано, користувацький шлях'; Severity = 'Середньо' } }
+        return [pscustomobject]@{ Status = 'Сторонній підпис'; Severity = 'Інфо' }
+    }
+    return [pscustomobject]@{ Status = 'Без дійсного підпису'; Severity = 'Високо' }
 }
 
 function Get-FileEvidence {   # MAC ДО читання -> hash/підпис/Zone.Identifier -> MAC ПІСЛЯ
@@ -1862,6 +1872,153 @@ Invoke-Step "2.11 Видимість за категоріями подій (aud
     Save-Csv $D.EventVisibility '02_system\event_visibility.csv'
 }
 
+# ════════════════════════════════════ 2.12 РОЗШИРЕНА ПЕРСИСТЕНТНІСТЬ ════════════════════════════════════
+# Точки закріплення, яких немає в 2.4. Лише читання реєстру/CIM. Для кожного DLL/EXE — наявність і підпис:
+# підпис Microsoft = штатно, без дійсного підпису = Високо. Значення, що мають бути порожніми, — окремо.
+Invoke-Step "2.12 Розширена персистентність: LSA, AppInit/AppCert, Winlogon, BootExecute, Active Setup, COM, netsh, Print Monitors, SilentProcessExit, драйвери" {
+    $rows = New-Object System.Collections.Generic.List[object]
+    $sys32 = Join-Path $env:SystemRoot 'System32'
+    function Resolve-PersistPath {   # 'msv1_0' / 'scecli.dll' / '%SystemRoot%\x.dll' / '"C:\a b\x.exe" /y' -> повний шлях
+        param([string]$v, [string]$DefaultExt = '.dll')
+        if (-not $v) { return '' }
+        $p = Get-ExeFromCmdRaw $v
+        if (-not $p) { return '' }
+        if (-not ($p.Contains('\') -or $p.Contains('/'))) {
+            if (-not [IO.Path]::GetExtension($p)) { $p += $DefaultExt }
+            foreach ($d in @($sys32, $env:SystemRoot, (Join-Path $sys32 'drivers'))) { $c = Join-Path $d $p; if (Test-Path -LiteralPath $c -PathType Leaf) { return $c } }
+            return (Join-Path $sys32 $p)
+        }
+        return $p
+    }
+    function Add-PRow {   # рядок із вердиктом за файлом
+        param([string]$Cat, [string]$Loc, [string]$Name, [string]$Value, [string]$Path, [string]$Why)
+        $bi = Get-BinInfo $Path
+        $cls = Get-PathClass $Path
+        $v = Get-PersistVerdict ([bool]($bi -and $bi.Exists)) $(if ($bi) { $bi.Sig } else { '' }) $(if ($bi) { $bi.Signer } else { '' }) $cls
+        $sev = $v.Severity; $match = Test-KwMatch "$Name $Value"
+        if ($bi -and $bi.SHA256 -and $IocSha256 -contains $bi.SHA256) { $sev = 'Критично'; $match = $true }
+        $rows.Add([pscustomobject]@{ Category = $Cat; Location = $Loc; Name = $Name; Value = $Value; Binary = $Path
+            Signature = $(if ($bi) { $bi.Sig } else { '' }); Signer = $(if ($bi) { $bi.Signer } else { '' }); SHA256 = $(if ($bi) { $bi.SHA256 } else { '' })
+            Status = $v.Status; Severity = $sev; Match = $match; Why = $Why })
+    }
+    function Add-VRow {   # рядок без файлу: значення, яке має бути порожнім / стандартним
+        param([string]$Cat, [string]$Loc, [string]$Name, [string]$Value, [string]$Status, [string]$Severity, [string]$Why)
+        $rows.Add([pscustomobject]@{ Category = $Cat; Location = $Loc; Name = $Name; Value = $Value; Binary = ''; Signature = ''; Signer = ''; SHA256 = ''
+            Status = $Status; Severity = $Severity; Match = (Test-KwMatch "$Name $Value"); Why = $Why })
+    }
+    function Get-RegVal { param([string]$Key, [string]$Name) try { return (Get-ItemProperty -LiteralPath $Key -Name $Name -ErrorAction Stop).$Name } catch { return $null } }
+    $userHives = @(Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^S-1-5-21-[\d-]+$' } | ForEach-Object { $_.PSChildName })
+
+    # ── LSA: пакети автентифікації / сповіщень / безпеки (T1547.002, .005, T1556.002) ──
+    $lsa = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+    foreach ($pk in @(@{ K = $lsa; N = 'Authentication Packages'; W = 'Завантажується в lsass: доступ до облікових даних (T1547.002)' },
+                      @{ K = $lsa; N = 'Notification Packages'; W = 'Отримує паролі у відкритому вигляді при зміні (T1556.002)' },
+                      @{ K = $lsa; N = 'Security Packages'; W = 'SSP у lsass: перехоплення облікових даних (T1547.005)' },
+                      @{ K = "$lsa\OSConfig"; N = 'Security Packages'; W = 'SSP у lsass (T1547.005)' })) {
+        foreach ($pkg in @(Get-RegVal $pk.K $pk.N)) {
+            $pkg = ([string]$pkg).Trim().Trim('"')
+            if (-not $pkg) { continue }
+            Add-PRow 'LSA' ("{0}\{1}" -f ($pk.K -replace '^HKLM:\\', 'HKLM\'), $pk.N) $pk.N $pkg (Resolve-PersistPath $pkg) $pk.W
+        }
+    }
+
+    # ── AppInit_DLLs / AppCertDlls (T1546.010, T1546.009) ──
+    foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Windows') {
+        $dlls = [string](Get-RegVal $k 'AppInit_DLLs'); $load = Get-RegVal $k 'LoadAppInit_DLLs'
+        if ($dlls.Trim()) {
+            foreach ($d in @($dlls -split '[,\s]+' | Where-Object { $_ })) { Add-PRow 'AppInit_DLLs' ($k -replace '^HKLM:\\', 'HKLM\') 'AppInit_DLLs' ("{0} (LoadAppInit_DLLs={1})" -f $d, $load) (Resolve-PersistPath $d) 'DLL завантажується в кожен процес з user32.dll (T1546.010)' }
+            if ($load -eq 1) { Add-VRow 'AppInit_DLLs' ($k -replace '^HKLM:\\', 'HKLM\') 'LoadAppInit_DLLs' '1' 'Увімкнено' 'Високо' 'AppInit_DLLs активні: DLL вище завантажуються в процеси' }
+        }
+    }
+    $acd = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\AppCertDlls'
+    $ai = Get-ItemProperty -LiteralPath $acd -ErrorAction SilentlyContinue
+    if ($ai) { foreach ($p in $ai.PSObject.Properties) { if ($p.Name -like 'PS*') { continue }; Add-PRow 'AppCertDlls' 'HKLM\...\Session Manager\AppCertDlls' $p.Name ([string]$p.Value) (Resolve-PersistPath ([string]$p.Value)) 'DLL завантажується при кожному CreateProcess (T1546.009); штатно ключ порожній' } }
+
+    # ── Winlogon: Notify, Shell/Userinit у HKCU, GinaDLL, Taskman, AppSetup (T1547.004) ──
+    $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+    foreach ($n in @(Get-ChildItem -LiteralPath "$wl\Notify" -ErrorAction SilentlyContinue)) {
+        $dll = [string](Get-RegVal $n.PSPath 'DllName')
+        if ($dll) { Add-PRow 'Winlogon' 'HKLM\...\Winlogon\Notify' $n.PSChildName $dll (Resolve-PersistPath $dll) 'DLL Winlogon Notify (T1547.004)' }
+    }
+    foreach ($n in 'GinaDLL', 'Taskman', 'AppSetup', 'System') {
+        $v = [string](Get-RegVal $wl $n)
+        if ($v -and -not ($n -eq 'System' -and $v -eq '')) { Add-PRow 'Winlogon' 'HKLM\...\Winlogon' $n $v (Resolve-PersistPath $v '.exe') 'Нетипове значення Winlogon (T1547.004)' }
+    }
+    foreach ($sid in $userHives) {
+        $uk = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows NT\CurrentVersion\Winlogon"
+        foreach ($n in 'Shell', 'Userinit') {
+            $v = [string](Get-RegVal $uk $n)
+            if ($v) { Add-VRow 'Winlogon (користувач)' "HKU\$sid\...\Winlogon" $n $v 'Нештатно' 'Високо' 'Shell/Userinit у кущі користувача замінює стандартний для цього користувача (T1547.004)' }
+        }
+        $ss = [string](Get-RegVal "Registry::HKEY_USERS\$sid\Control Panel\Desktop" 'SCRNSAVE.EXE')
+        if ($ss) { Add-PRow 'Заставка' "HKU\$sid\Control Panel\Desktop" 'SCRNSAVE.EXE' $ss (Resolve-PersistPath $ss '.scr') 'Заставка запускається від імені користувача (T1546.002)' }
+    }
+
+    # ── Session Manager: BootExecute / SetupExecute / Execute (T1547.001-подібне, до старту Windows) ──
+    $sm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    foreach ($n in 'BootExecute', 'SetupExecute', 'Execute', 'S0InitialCommand') {
+        foreach ($v in @(Get-RegVal $sm $n)) {
+            $v = ([string]$v).Trim()
+            if (-not $v) { continue }
+            $ok = ($n -eq 'BootExecute' -and $v -match '^(?i)autocheck autochk (/q /v )?\*$')
+            Add-VRow 'Session Manager' 'HKLM\...\Session Manager' $n $v $(if ($ok) { 'Штатно' } else { 'Нештатно' }) $(if ($ok) { '' } else { 'Високо' }) 'Запускається Session Manager до входу користувача; штатно лише BootExecute = autocheck autochk *'
+        }
+    }
+
+    # ── Active Setup: StubPath (T1547.014) ──
+    foreach ($root in 'HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Active Setup\Installed Components') {
+        foreach ($c in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+            $sp = [string](Get-RegVal $c.PSPath 'StubPath')
+            if (-not $sp) { continue }
+            Add-PRow 'Active Setup' ($root -replace '^HKLM:\\', 'HKLM\') $c.PSChildName $sp (Resolve-PersistPath $sp '.exe') 'Виконується при першому вході кожного користувача (T1547.014)'
+        }
+    }
+
+    # ── COM hijack: CLSID у кущі користувача перекриває системний (T1546.015) ──
+    foreach ($sid in $userHives) {
+        foreach ($c in @(Get-ChildItem -LiteralPath "Registry::HKEY_USERS\${sid}_Classes\CLSID" -ErrorAction SilentlyContinue)) {
+            $srv = $null
+            foreach ($sub in 'InprocServer32', 'LocalServer32') { $k = Get-Item -LiteralPath (Join-Path $c.PSPath $sub) -ErrorAction SilentlyContinue; if ($k) { $v = $k.GetValue(''); if ($v) { $srv = [string]$v; break } } }
+            if (-not $srv) { continue }
+            if (-not (Test-Path -LiteralPath "HKLM:\SOFTWARE\Classes\CLSID\$($c.PSChildName)")) { continue }   # лише перекриття системних CLSID
+            Add-PRow 'COM hijack' "HKU\${sid}_Classes\CLSID" $c.PSChildName $srv (Resolve-PersistPath $srv) 'CLSID користувача перекриває системний: процеси користувача завантажать цей сервер (T1546.015)'
+        }
+    }
+
+    # ── netsh helpers (T1546.007), Print Monitors (T1547.010), Time Providers (T1547.003) ──
+    $nh = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NetSh' -ErrorAction SilentlyContinue
+    if ($nh) { foreach ($p in $nh.PSObject.Properties) { if ($p.Name -like 'PS*') { continue }; Add-PRow 'netsh helper' 'HKLM\SOFTWARE\Microsoft\NetSh' $p.Name ([string]$p.Value) (Resolve-PersistPath ([string]$p.Value)) 'DLL завантажується при кожному запуску netsh (T1546.007)' } }
+    foreach ($m in @(Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors' -ErrorAction SilentlyContinue)) {
+        $drv = [string](Get-RegVal $m.PSPath 'Driver')
+        if ($drv) { Add-PRow 'Print Monitor' 'HKLM\...\Print\Monitors' $m.PSChildName $drv (Resolve-PersistPath $drv) 'DLL завантажується в spoolsv (SYSTEM) при старті (T1547.010)' }
+    }
+    foreach ($t in @(Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders' -ErrorAction SilentlyContinue)) {
+        $dll = [string](Get-RegVal $t.PSPath 'DllName')
+        if ($dll) { Add-PRow 'Time Provider' 'HKLM\...\W32Time\TimeProviders' $t.PSChildName $dll (Resolve-PersistPath $dll) 'DLL завантажується службою часу (T1547.003)' }
+    }
+
+    # ── IFEO SilentProcessExit: запуск при завершенні процесу (T1546.012) ──
+    foreach ($k in @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit' -ErrorAction SilentlyContinue)) {
+        $mp = [string](Get-RegVal $k.PSPath 'MonitorProcess')
+        if ($mp) { Add-VRow 'SilentProcessExit' 'HKLM\...\SilentProcessExit' $k.PSChildName $mp 'Нештатно' 'Високо' 'MonitorProcess запускається при завершенні процесу (T1546.012)' }
+    }
+
+    # ── Драйвери, що працюють: без дійсного підпису або поза System32\drivers (T1543.003 / rootkit) ──
+    foreach ($d in @(Get-CimInstance Win32_SystemDriver -Filter "State='Running'" -ErrorAction SilentlyContinue)) {
+        $p = [string]$d.PathName
+        if (-not $p) { continue }
+        $p = $p -replace '^\\\?\?\\', ''
+        $p = Resolve-PersistPath $p '.sys'
+        $bi = Get-BinInfo $p
+        $inDrivers = $p.StartsWith((Join-Path $sys32 'drivers') + '\', [StringComparison]::OrdinalIgnoreCase) -or $p.StartsWith((Join-Path $sys32 'DriverStore') + '\', [StringComparison]::OrdinalIgnoreCase)
+        if ($bi -and $bi.Exists -and $bi.Sig -eq 'Valid' -and $inDrivers) { continue }   # штатні драйвери не виводимо — їх сотні
+        Add-PRow 'Драйвер' 'Win32_SystemDriver (Running)' $d.Name ("{0}; {1}" -f $d.DisplayName, $d.StartMode) $p $(if ($inDrivers) { 'Драйвер ядра без дійсного підпису' } else { 'Драйвер ядра поза System32\drivers' })
+    }
+
+    $D.PersistExt = Arr $rows
+    Save-Csv $D.PersistExt '02_system\persistence_extended.csv'
+}
+
 # ════════════════════════════════════ 3. ЖУРНАЛИ ПОДІЙ ЗА ВІКНО ════════════════════════════════════
 Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776, зміни облікових записів, очищення журналів" {
     $rows = foreach ($e in (Get-Ev 'Security' @(4625))) {
@@ -2900,6 +3057,11 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     foreach ($p in @($D.Procs | Where-Object { $_.Flags })) { Add-Flag 'Середньо' 'Процеси' ("Процес {0} (PID {1})" -f $p.Name, $p.PID) ("{0} — {1}" -f $p.Path, $p.Flags) 'volatile' }
     foreach ($c in @($D.Tcp | Where-Object { $_.State -eq 'Established' -and $_.RemoteIsPublic -and $_.Signature -and $_.Signature -ne 'Valid' })) { Add-Flag 'Високо' 'Мережа' ("Непідписаний процес має зовнішнє з'єднання: {0}" -f $c.Process) ("{0}:{1} ← {2}" -f $c.RemoteAddress, $c.RemotePort, $c.ProcessPath) 'volatile' }
     foreach ($a in @($D.Autoruns | Where-Object { $_.Match -or $_.PathClass -in @('Нестандартний', 'Користувацький/тимчасовий', 'НЕСТАНДАРТНЕ значення') })) { Add-Flag 'Середньо' 'Персистентність' ("{0}: {1}" -f $a.Type, $a.Name) $a.Command 'persist' }
+    foreach ($r in @($D.PersistExt | Where-Object { $_.Severity -in 'Критично', 'Високо', 'Середньо' -or $_.Match })) {
+        $sev = $r.Severity; $ev = ("{0} — {1}. {2}" -f $r.Value, $r.Status, $r.Why)
+        if ($sev -notin 'Критично', 'Високо', 'Середньо') { $sev = 'Середньо'; $ev += ' — Збіг з маскою IOC' }
+        Add-Flag $sev 'Персистентність' ("{0}: {1}" -f $r.Category, $r.Name) $ev 'persist'
+    }
     foreach ($w in @($D.WmiPersist | Where-Object { -not $_.LikelyBenign })) { Add-Flag 'Високо' 'Персистентність' ("WMI-підписка {0}: {1}" -f $w.Class, $w.Name) $w.Details 'persist' }
     foreach ($l in @($D.LogHealth | Where-Object { $_.Severity -in 'Високо', 'Середньо' })) { Add-Flag $l.Severity 'Журнали' ("Журнал {0}: {1} MB, історія {2} дн." -f $l.Log, $l.MaxMB, $l.HistoryDays) $l.Advice 'system' }
     foreach ($h in @($D.Hardening | Where-Object { $_.Status -eq 'Ризик' -and $_.Severity -in 'Високо', 'Середньо' })) {
@@ -3186,7 +3348,9 @@ Invoke-Step "8. Формування HTML-звіту" {
 
     $b = (H3 'Run / Winlogon / IFEO / Startup') + (HT $D.Autoruns -Csv '02_system\autoruns.csv' -RowClass { param($r) if ($r.Match -or $r.PathClass -in @('Нестандартний', 'Користувацький/тимчасовий', 'НЕСТАНДАРТНЕ значення')) { 'warn' } }) +
          (H3 'WMI-підписки (root\subscription)') + (HT $D.WmiPersist -Empty 'WMI-підписок не знайдено.' -RowClass { param($r) if (-not $r.LikelyBenign) { 'bad' } })
-    [void]$S.Append((Sec 'persist' '9. Персистентність' $b -Count @($D.Autoruns).Count))
+    $b += (H3 'Розширена персистентність (крок 2.12)' 'LSA, AppInit/AppCert, Winlogon, BootExecute, Active Setup, COM hijack, netsh, Print Monitors, Time Providers, SilentProcessExit, драйвери поза System32\drivers або без підпису. Підпис Microsoft = штатно.') +
+          (HT ($D.PersistExt | Sort-Object @{ Expression = { @{ 'Критично' = 0; 'Високо' = 1; 'Середньо' = 2; 'Інфо' = 3 }[[string]$_.Severity] } }, Category) -Cols @('Category', 'Location', 'Name', 'Value', 'Binary', 'Signature', 'Signer', 'Status', 'Severity', 'Why') -Csv '02_system\persistence_extended.csv' -RowClass { param($r) if ($r.Severity -in 'Критично', 'Високо') { 'bad' } elseif ($r.Severity -eq 'Середньо' -or $r.Match) { 'warn' } elseif ($r.Status -eq 'Штатно') { 'good' } })
+    [void]$S.Append((Sec 'persist' '9. Персистентність' $b -Count (@($D.Autoruns).Count + @($D.PersistExt | Where-Object { $_.Severity -in 'Критично', 'Високо', 'Середньо' }).Count)))
 
     $b = (H3 'Профілі та логування') + (HT $D.FwProfiles) +
          (H3 'Зміни правил за вікно' "Категорія 'Windows / служба' — зміни від svchost/mpssvc (як правило, автоматичні).") + (HT $D.FwEvents -Csv '03_eventlogs\firewall_rule_change_events.csv' -RowClass { param($r) if ($r.Match) { 'bad' } elseif ($r.Category -notlike 'Windows*') { 'warn' } }) +

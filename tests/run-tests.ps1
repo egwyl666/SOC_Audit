@@ -193,6 +193,14 @@ try {
         Assert-True 'Get-EventIdCount24h: неіснуючий канал -> null' ($null -eq (Get-EventIdCount24h 'SOC-Collect-No-Such/Log' @(1) $now))
     }
 
+    Test-Group 'Вердикт персистентності (Get-PersistVerdict)'
+    Assert-True 'підпис Microsoft = штатно'        ((Get-PersistVerdict $true 'Valid' 'Microsoft Windows' 'Системний').Status -eq 'Штатно')
+    Assert-True 'сторонній підпис = Інфо'          ((Get-PersistVerdict $true 'Valid' 'Google LLC' 'Program Files').Severity -eq 'Інфо')
+    Assert-True 'підписано, профіль = Середньо'    ((Get-PersistVerdict $true 'Valid' 'Zoom' 'Користувацький/тимчасовий').Severity -eq 'Середньо')
+    Assert-True 'без підпису = Високо'             ((Get-PersistVerdict $true 'NotSigned' '' 'Системний').Severity -eq 'Високо')
+    Assert-True 'HashMismatch = Високо'            ((Get-PersistVerdict $true 'HashMismatch' 'Microsoft Windows' 'Системний').Severity -eq 'Високо')
+    Assert-True 'файлу немає = Середньо'           ((Get-PersistVerdict $false '' '' '').Status -eq 'Файл відсутній')
+
     Test-Group 'Видимість за категоріями подій'
     $xp = Get-EventIdXPath @(4624, 4625) ([datetime]'2026-01-01T00:00:00Z') ([datetime]'2026-01-02T00:00:00Z')
     Assert-True 'XPath: кілька ID через or' ($xp -like '*(EventID=4624 or EventID=4625) and TimeCreated*')
