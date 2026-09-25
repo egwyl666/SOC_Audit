@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.5.0 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.7.0 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -70,6 +70,7 @@ param(
         "397E90D1E6E5CA717186A12011220AD18092F10DB85101CB994DC0567D9F568E"
     ),
     [string[]]$IocIPs = @("192.168.77.51", "fe80::1a2b:3c4d:5e6f:7a8b", "10.9.0.20"),
+    [string[]]$IocSha1 = @(),      # SHA1 (Amcache зберігає SHA1, а не SHA256)
 
     # ─── Де шукати файли (порожньо = всі локальні диски) ────────────────────
     [string[]]$SearchRoots = @(),
@@ -153,7 +154,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.5.0'
+$ToolVersion = '1.7.1'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -184,7 +185,7 @@ $CustodyLive = Join-Path $CaseDir 'chain_of_custody.log'
 # При запуску через -File списки "a,b,c" приходять одним рядком — розбиваємо
 function Split-ListParam { param([string[]]$v) if ($v -and $v.Count -eq 1 -and $v[0] -match ',') { return @($v[0] -split '\s*,\s*' | Where-Object { $_ }) }; return @($v) }
 $NamePatterns = Split-ListParam $NamePatterns; $KnownPaths = Split-ListParam $KnownPaths; $IocSha256 = Split-ListParam $IocSha256
-$IocIPs = Split-ListParam $IocIPs; $SearchRoots = Split-ListParam $SearchRoots; $ExcludeDirs = Split-ListParam $ExcludeDirs
+$IocIPs = Split-ListParam $IocIPs; $IocSha1 = @(Split-ListParam $IocSha1 | ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { $_ }); $SearchRoots = Split-ListParam $SearchRoots; $ExcludeDirs = Split-ListParam $ExcludeDirs
 # Папку з доказами виключаємо з пошуку ПІСЛЯ розбиття списку. Якщо OutRoot — корінь диска (E:\),
 # виключаємо лише папку поточної справи, інакше '\' виключив би взагалі все.
 $OutRel = ($OutRoot -replace '^[A-Za-z]:', '').TrimEnd('\')
@@ -218,7 +219,7 @@ $DataKeys = 'TcpRaw','UdpRaw','ProcRaw','Procs','Tcp','Udp','Arp','Dns','IpAddr'
             'LocalUsers','LocalAdmins','Services','Tasks','Autoruns','WmiPersist','MpExclusions','MpStatusRows','Licensing','KmsReg',
             'FwProfiles','FwRules','Ev4625','Ev4624','OtherAuth','LogCleared','Rdp','RdpSummary','SvcEvents','TaskEvents',
             'FwEvents','MpEvents','Exec','SysmonMisc','Ps4104','FwByPort','FwBySource','FwIocRaw','FwSvcHits','KnownFiles',
-            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
+            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','UserAssist','RunMru','ShimCache','Amcache','TasksAll','FwRulesAll','PrefetchAll','MpFull','LogInventory','EventVisibility','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
 foreach ($k in $DataKeys) { $D[$k] = @() }
 
 $Lolbins = @('netsh.exe','wmic.exe','reg.exe','sc.exe','schtasks.exe','cscript.exe','wscript.exe','mshta.exe','rundll32.exe',
@@ -282,7 +283,7 @@ function Add-Custody {
     $line = "{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f $o.Seq, $o.TimeUtc, $o.Operator, $o.Action, $o.Target, $o.Result, $o.Details
     try { [IO.File]::AppendAllText($CustodyLive, $line + [Environment]::NewLine, (New-Object Text.UTF8Encoding($true))) } catch {}
 }
-function Add-Note { param([string]$t) $Notes.Add($t) }
+function Add-Note { param([string]$t) if (-not $Notes.Contains($t)) { $Notes.Add($t) } }   # без дублікатів
 function Add-Flag {
     param([string]$Sev, [string]$Area, [string]$Title, [string]$Evidence, [string]$Anchor = 'summary')
     $Flags.Add([pscustomobject]@{ Severity = $Sev; Area = $Area; Finding = $Title; Evidence = $Evidence; Anchor = $Anchor })
@@ -632,6 +633,57 @@ function Get-LogAdvice {   # рекомендації щодо журналу: �
     return [pscustomobject]@{ Severity = $sev; HistoryDays = $days; Advice = ($adv -join ' | ') }
 }
 
+function Get-LogEvents24h {   # скільки подій з часом у межах 24 год до моменту збору
+    # Точний підрахунок (EventLogReader, без рендерингу повідомлень), якщо подій не більше $ExactLimit;
+    # для дуже великих каналів — оцінка за різницею RecordId, позначена «≈» (порядок запису ≠ порядок часу після корекції годинника)
+    param([string]$Name, [datetime]$At, [int]$ExactLimit = 100000)
+    $newest = $null; try { $newest = Get-WinEvent -LogName $Name -MaxEvents 1 -ErrorAction Stop } catch { return $null }
+    if (-not $newest) { return 0 }
+    $from = $At.AddHours(-24)
+    $first = $null; try { $first = Get-WinEvent -FilterHashtable @{ LogName = $Name; StartTime = $from } -Oldest -MaxEvents 1 -ErrorAction Stop } catch { return 0 }
+    $est = $null
+    if ($first -and $null -ne $first.RecordId -and $null -ne $newest.RecordId) { $est = [int64]$newest.RecordId - [int64]$first.RecordId + 1 }
+    if ($null -ne $est -and $est -gt $ExactLimit) { return ('≈' + $est) }
+    $xp = "*[System[TimeCreated[@SystemTime>='{0}' and @SystemTime<='{1}']]]" -f $from.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ'), $At.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    $reader = $null; $n = 0
+    try {
+        $q = New-Object System.Diagnostics.Eventing.Reader.EventLogQuery($Name, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $xp)
+        $reader = New-Object System.Diagnostics.Eventing.Reader.EventLogReader($q)
+        while ($null -ne ($ev = $reader.ReadEvent())) { $n++; $ev.Dispose() }
+    } catch { if ($null -ne $est) { return ('≈' + $est) } else { return $null } }
+    finally { if ($reader) { $reader.Dispose() } }
+    return $n
+}
+function Get-EventIdXPath {   # XPath: вказані Event ID (або всі, якщо не задано) у проміжку часу
+    param([int[]]$Ids, [datetime]$From, [datetime]$To)
+    $t = "TimeCreated[@SystemTime>='{0}' and @SystemTime<='{1}']" -f $From.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ'), $To.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    if (-not @($Ids).Count) { return "*[System[$t]]" }
+    return ("*[System[({0}) and {1}]]" -f ((@($Ids) | ForEach-Object { "EventID=$_" }) -join ' or '), $t)
+}
+function Get-EventIdCount24h {   # подій з вказаними Event ID за 24 год до моменту збору: Total, ById (Id -> кількість), Capped; $null — канал недоступний
+    param([string]$Log, [int[]]$Ids, [datetime]$At, [int]$Limit = 100000)
+    $xp = Get-EventIdXPath $Ids $At.AddHours(-24) $At
+    $by = @{}; $n = 0; $cap = $false; $reader = $null
+    try {
+        $q = New-Object System.Diagnostics.Eventing.Reader.EventLogQuery($Log, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $xp)
+        $reader = New-Object System.Diagnostics.Eventing.Reader.EventLogReader($q)
+        while ($null -ne ($ev = $reader.ReadEvent())) {
+            $n++; $k = [int]$ev.Id; if ($by.ContainsKey($k)) { $by[$k]++ } else { $by[$k] = 1 }; $ev.Dispose()
+            if ($n -ge $Limit) { $cap = $true; break }
+        }
+    } catch { return $null }
+    finally { if ($reader) { $reader.Dispose() } }
+    return [pscustomobject]@{ Total = $n; ById = $by; Capped = $cap }
+}
+function Get-VisibilityStatus {   # Бачимо / Частково / НЕ бачимо / Невідомо за станом джерела ($true/$false/$null) і кількістю подій за 24 год
+    param($Enabled, [bool]$Partial, $Events)
+    $has = ($null -ne $Events -and [int64]$Events -gt 0)
+    if ($Enabled -eq $true) { if ($Partial) { return 'Частково' } else { return 'Бачимо' } }
+    if ($Enabled -eq $false) { if ($has) { return 'Частково' } else { return 'НЕ бачимо' } }   # вимкнено зараз, але події за добу є
+    if ($has) { return 'Бачимо' }   # стан не прочитано, але події доводять видимість
+    return 'Невідомо'
+}
+
 # ─── Журнали подій ───
 function Get-Ev {
     param([string]$Log, [int[]]$Id)
@@ -725,6 +777,73 @@ function ConvertFrom-AuditpolCsv {   # рядки 'auditpol /get /subcategory:{G
     if ($v) { $res.Value = $v }   # нічого не розпізнали -> $null («невідомо»), а не 0 («немає аудиту»)
     return $res
 }
+# ─── Сліди запуску (v1.6): чисті функції розбору бінарних форматів — тестуються окремо (tests/run-tests.ps1) ───
+function ConvertFrom-Rot13 {   # імена значень UserAssist закодовано ROT13
+    param([string]$s)
+    if (-not $s) { return $s }
+    $c = $s.ToCharArray()
+    for ($i = 0; $i -lt $c.Length; $i++) {
+        $ch = [int]$c[$i]
+        if ($ch -ge 65 -and $ch -le 90) { $c[$i] = [char](65 + (($ch - 65 + 13) % 26)) }
+        elseif ($ch -ge 97 -and $ch -le 122) { $c[$i] = [char](97 + (($ch - 97 + 13) % 26)) }
+    }
+    return -join $c
+}
+$KnownFolderGuids = @{   # KNOWNFOLDERID, якими UserAssist підміняє початок шляху
+    '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}' = '%SystemRoot%\System32'; '{D65231B0-B2F1-4857-A4CE-A8E7C6EA7D27}' = '%SystemRoot%\SysWOW64'
+    '{F38BF404-1D43-42F2-9305-67DE0B28FC23}' = '%SystemRoot%'; '{6D809377-6AF0-444B-8957-A3773F02200E}' = '%ProgramFiles%'
+    '{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}' = '%ProgramFiles(x86)%'; '{F7F1ED05-9F6D-47A2-AAAE-29D317C6F066}' = '%CommonProgramFiles%'
+    '{0139D44E-6AFE-49F2-8690-3DAFCAE6FFB8}' = '%ProgramData%\Microsoft\Windows\Start Menu\Programs'
+    '{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}' = '%AppData%\Microsoft\Windows\Start Menu\Programs'
+    '{9E3995AB-1F9C-4F13-B827-48B24B6C7174}' = '%AppData%\Microsoft\Internet Explorer\Quick Launch\User Pinned'
+    '{374DE290-123F-4565-9164-39C4925E467B}' = '%UserProfile%\Downloads'; '{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}' = '%UserProfile%\Desktop'
+    '{FDD39AD0-238F-46AF-ADB4-6C85480369C7}' = '%UserProfile%\Documents'; '{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}' = '%LocalAppData%'
+    '{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}' = '%AppData%'; '{A520A1A4-1780-4FF6-BD18-167343C5AF16}' = '%UserProfile%\AppData\LocalLow'
+    '{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}' = '%ProgramData%'; '{5E6C858F-0E22-4760-9AFE-EA3317B67173}' = '%UserProfile%'
+}
+function Resolve-KnownFolderPath {
+    param([string]$p)
+    if ($p -match '^(\{[0-9A-Fa-f-]{36}\})(.*)$' -and $KnownFolderGuids.ContainsKey($Matches[1].ToUpperInvariant())) { return $KnownFolderGuids[$Matches[1].ToUpperInvariant()] + $Matches[2] }
+    return $p
+}
+function ConvertFrom-UserAssistData {   # значення Count\<ROT13>: Win7+ — 72 байти, XP/2003 — 16 байт
+    param([byte[]]$b)
+    $r = [pscustomobject]@{ RunCount = $null; FocusCount = $null; FocusSeconds = $null; LastRunUtc = $null }
+    if (-not $b) { return $r }
+    $ft = [int64]0
+    if ($b.Length -ge 72) {
+        $r.RunCount = [BitConverter]::ToInt32($b, 4); $r.FocusCount = [BitConverter]::ToInt32($b, 8)
+        $r.FocusSeconds = [math]::Round([BitConverter]::ToUInt32($b, 12) / 1000); $ft = [BitConverter]::ToInt64($b, 60)
+    } elseif ($b.Length -ge 16) {
+        $r.RunCount = [math]::Max(0, [BitConverter]::ToInt32($b, 4) - 5); $ft = [BitConverter]::ToInt64($b, 8)
+    }
+    if ($ft -gt 0) { try { $r.LastRunUtc = [DateTime]::FromFileTimeUtc($ft) } catch {} }
+    return $r
+}
+function ConvertFrom-ShimCache {   # AppCompatCache, формат Windows 10/11 і Server 2016+ (заголовок 0x30/0x34, записи '10ts')
+    param([byte[]]$b)
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not $b -or $b.Length -lt 0x40) { return $out.ToArray() }
+    $off = [BitConverter]::ToInt32($b, 0)
+    if ($off -notin 0x30, 0x34) { return $out.ToArray() }   # інші версії ОС — не підтримуються (звіт скаже «формат не розпізано»)
+    $order = 0
+    while ($off + 14 -le $b.Length) {
+        if (-not ($b[$off] -eq 0x31 -and $b[$off + 1] -eq 0x30 -and $b[$off + 2] -eq 0x74 -and $b[$off + 3] -eq 0x73)) { break }   # '10ts'
+        $entryLen = [BitConverter]::ToInt32($b, $off + 8)
+        $p = $off + 12
+        if ($entryLen -lt 14 -or $p + $entryLen -gt $b.Length) { break }
+        $pathLen = [BitConverter]::ToUInt16($b, $p); $p += 2
+        if ($p + $pathLen + 12 -gt $b.Length) { break }
+        $path = [Text.Encoding]::Unicode.GetString($b, $p, $pathLen); $p += $pathLen
+        $ft = [BitConverter]::ToInt64($b, $p)
+        $mod = $null; if ($ft -gt 0) { try { $mod = [DateTime]::FromFileTimeUtc($ft) } catch {} }
+        $out.Add([pscustomobject]@{ Order = $order; Path = $path; LastModifiedUtc = $mod })
+        $order++
+        $off = $off + 12 + $entryLen
+    }
+    return $out.ToArray()
+}
+
 function Get-AuditSubcategory { param([string]$Guid) try { return (ConvertFrom-AuditpolCsv @(& auditpol /get /subcategory:"$Guid" /r 2>$null)) } catch { return [pscustomobject]@{ Value = $null; Text = '' } } }
 
 function Get-Sha256FromHashes { param([string]$h) if ($h -match '(?i)SHA256=([0-9a-f]{64})') { return $Matches[1].ToUpper() }; return '' }
@@ -755,7 +874,7 @@ Write-Host ("Вікно подій: {0} → {1} (локальний час)" -f 
 Write-Host ("Результати: {0}" -f $CaseDir)
 # Тестові IOC за замовчуванням (кейс KMSAuto): якщо жоден IOC-параметр не передано, збіги з масками — шум, а не знахідки
 $ScriptBound = $PSBoundParameters   # копія посилання: усередині Where-Object {} $PSBoundParameters може належати іншій області
-$UsingDefaultIoc = -not (@('NamePatterns', 'IocSha256', 'IocIPs', 'KnownPaths') | Where-Object { $ScriptBound.ContainsKey($_) })
+$UsingDefaultIoc = -not (@('NamePatterns', 'IocSha256', 'IocSha1', 'IocIPs', 'KnownPaths') | Where-Object { $ScriptBound.ContainsKey($_) })
 if ($UsingDefaultIoc) {
     Write-Host "УВАГА: IOC не задано — використано тестові IOC за замовчуванням (KMSAuto). Збіги з масками знижено до «Інфо». Для справи передайте -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths." -ForegroundColor Yellow
     Add-Note 'Використано тестові IOC за замовчуванням (кейс KMSAuto): жоден з -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths не передано. Прапорці, що спираються лише на збіг з маскою, знижено до «Інфо».'
@@ -883,7 +1002,7 @@ Invoke-Step "1.1 Швидкий знімок: netstat, TCP, процеси, UDP 
 }
 
 Invoke-Step "1.2 ARP/NDP-сусіди, DNS-кеш, IP-конфігурація, маршрути" {
-    $arp = foreach ($n in @(Get-NetNeighbor -ErrorAction SilentlyContinue | Where-Object { $_.State -notin @('Unreachable', 'Permanent') })) {
+    $arp = foreach ($n in @(Get-NetNeighbor -ErrorAction SilentlyContinue)) {   # усі стани, включно з Unreachable/Permanent (колонка State)
         [pscustomobject]@{ IPAddress = $n.IPAddress; MAC = $n.LinkLayerAddress; State = [string]$n.State; Family = [string]$n.AddressFamily; Interface = $n.InterfaceAlias; IocIP = (Test-IocIPEq $n.IPAddress) }
     }
     $D.Arp = Arr ($arp | Sort-Object @{ Expression = { -not $_.IocIP } }, Family, IPAddress)
@@ -1017,19 +1136,23 @@ Invoke-Step "2.3 Задачі планувальника: автор (з XML з�
         foreach ($a in @($t.Actions)) { if ($a.Execute) { $firstExe = Resolve-BareExe ([Environment]::ExpandEnvironmentVariables(([string]$a.Execute).Trim('"'))); break } }
         $cls = Get-EffPathClass $firstExe
         # \Microsoft\* пропускаємо лише якщо задача виглядає штатною (маскування під системну — класичний прийом)
+        # Повний перелік зберігається завжди (scheduled_tasks_all.csv); прапорці/hash — лише для сторонніх і підозрілих
         $msWhy = ''
-        if ($isMs) { $msWhy = Get-MsTaskSuspicion $firstExe ($acts -join ' ') ([string]$t.Author); if (-not $msWhy) { continue } }
+        if ($isMs) { $msWhy = Get-MsTaskSuspicion $firstExe ($acts -join ' ') ([string]$t.Author) }
+        $clean = ($isMs -and -not $msWhy)
         $info = $null; try { $info = Get-ScheduledTaskInfo -InputObject $t -ErrorAction Stop } catch {}
         $trig = @($t.Triggers | ForEach-Object {
             $n = ([string]$_.CimClass.CimClassName) -replace '^MSFT_Task', '' -replace 'Trigger$', ''
             if ($_.StartBoundary) { "$n від $($_.StartBoundary)" } else { $n } }) -join ' | '
-        $bi = $null; if ($firstExe) { $bi = Get-BinInfo $firstExe }
+        $bi = $null; if ($firstExe -and -not $clean) { $bi = Get-BinInfo $firstExe }
         $flag = @()
-        if (-not $isMs) { $flag += 'Стороння задача' } else { $flag += "Маскування під \Microsoft\: $msWhy" }
-        if ($cls -in @('Нестандартний', 'Користувацький/тимчасовий')) { $flag += "Дія: $cls" }
-        if (Test-KwMatch "$($t.TaskName) $($t.Author) $($acts -join ' ')") { $flag += 'Збіг з маскою IOC' }
-        if ($bi -and $bi.SHA256 -and $IocSha256 -contains $bi.SHA256) { $flag += 'IOC HASH' }
-        if ($t.Settings -and $t.Settings.Hidden) { $flag += 'Прихована' }
+        if (-not $clean) {
+            if (-not $isMs) { $flag += 'Стороння задача' } else { $flag += "Маскування під \Microsoft\: $msWhy" }
+            if ($cls -in @('Нестандартний', 'Користувацький/тимчасовий')) { $flag += "Дія: $cls" }
+            if (Test-KwMatch "$($t.TaskName) $($t.Author) $($acts -join ' ')") { $flag += 'Збіг з маскою IOC' }
+            if ($bi -and $bi.SHA256 -and $IocSha256 -contains $bi.SHA256) { $flag += 'IOC HASH' }
+            if ($t.Settings -and $t.Settings.Hidden) { $flag += 'Прихована' }
+        }
         $last = ''; $next = ''; $res = ''
         if ($info) {
             $last = U $info.LastRunTime; $next = U $info.NextRunTime
@@ -1041,10 +1164,12 @@ Invoke-Step "2.3 Задачі планувальника: автор (з XML з�
             RegisteredUtc = $reg; RunAs = $t.Principal.UserId; RunLevel = [string]$t.Principal.RunLevel
             Actions = ($acts -join ' | '); ActionBinary = $firstExe; ActionSHA256 = $(if ($bi) { $bi.SHA256 } else { '' })
             ActionSignature = $(if ($bi) { $bi.Sig } else { '' }); Triggers = $trig
-            LastRunUtc = $last; NextRunUtc = $next; LastResult = $res; Flags = ($flag -join '; ')
+            LastRunUtc = $last; NextRunUtc = $next; LastResult = $res; Suspicious = (-not $clean); Flags = ($flag -join '; ')
         }
     }
-    $D.Tasks = Arr $rows
+    $D.TasksAll = Arr $rows
+    $D.Tasks = Arr ($rows | Where-Object { $_.Suspicious })
+    Save-Csv $D.TasksAll '02_system\scheduled_tasks_all.csv'
     Save-Csv $D.Tasks '02_system\scheduled_tasks_nonms_or_suspicious.csv'
 }
 
@@ -1118,6 +1243,18 @@ Invoke-Step "2.5 Microsoft Defender: стан захисту та винятки
     if ($pref) { foreach ($n in 'DisableRealtimeMonitoring', 'DisableBehaviorMonitoring', 'DisableIOAVProtection', 'DisableScriptScanning', 'MAPSReporting', 'SubmitSamplesConsent') { $rows += [pscustomobject]@{ Setting = "Pref.$n"; Value = [string]$pref.$n } } }
     $D.MpStatusRows = Arr $rows
     Save-Csv $D.MpStatusRows '02_system\defender_status.csv'
+    # Повний стан і налаштування Defender (усі властивості, не лише ключові)
+    $full = New-Object System.Collections.Generic.List[object]
+    foreach ($src in @(@{ N = 'Get-MpComputerStatus'; O = $st }, @{ N = 'Get-MpPreference'; O = $pref })) {
+        if (-not $src.O) { continue }
+        foreach ($pp in $src.O.PSObject.Properties) {
+            if ($pp.Name -like 'Cim*' -or $pp.Name -in 'PSComputerName', 'ComputerID') { continue }
+            $v = $pp.Value; if ($v -is [array]) { $v = ($v -join '; ') }
+            $full.Add([pscustomobject]@{ Source = $src.N; Setting = $pp.Name; Value = [string]$v })
+        }
+    }
+    $D.MpFull = Arr $full
+    Save-Csv $D.MpFull '02_system\defender_full.csv'
     $ex = @()
     if ($pref) {
         foreach ($t in @(@{ N = 'Path'; P = 'ExclusionPath' }, @{ N = 'Process'; P = 'ExclusionProcess' }, @{ N = 'Extension'; P = 'ExclusionExtension' }, @{ N = 'IpAddress'; P = 'ExclusionIpAddress' })) {
@@ -1177,7 +1314,7 @@ Invoke-Step "2.7 Firewall: профілі, налаштування логува
     $pfIdx = @{}; foreach ($f in @(Get-NetFirewallPortFilter -All -ErrorAction SilentlyContinue)) { $pfIdx[$f.InstanceID] = $f }
     $afIdx = @{}; foreach ($f in @(Get-NetFirewallApplicationFilter -All -ErrorAction SilentlyContinue)) { $afIdx[$f.InstanceID] = $f }
     $adIdx = @{}; foreach ($f in @(Get-NetFirewallAddressFilter -All -ErrorAction SilentlyContinue)) { $adIdx[$f.InstanceID] = $f }
-    $rows = foreach ($r in @(Get-NetFirewallRule -ErrorAction Stop | Where-Object { [string]$_.Enabled -eq 'True' })) {
+    $rows = foreach ($r in @(Get-NetFirewallRule -ErrorAction Stop)) {   # усі правила, включно з вимкненими (Enabled)
         $pf = $pfIdx[$r.Name]; $af = $afIdx[$r.Name]; $ad = $adIdx[$r.Name]
         $prog = ''; if ($af) { $prog = [Environment]::ExpandEnvironmentVariables([string]$af.Program) }
         $lp = ''; $rp = ''; $proto = ''
@@ -1187,10 +1324,12 @@ Invoke-Step "2.7 Firewall: профілі, налаштування логува
         if (Test-KwMatch "$($r.Name) $($r.DisplayName) $prog") { $flag += 'Збіг з маскою IOC' }
         if ("$lp,$rp" -match '(^|,)1688(,|$)') { $flag += 'Порт 1688 (KMS)' }
         if ($prog -and $prog -notin @('Any', 'System') -and (Get-EffPathClass $prog) -in @('Нестандартний', 'Користувацький/тимчасовий')) { $flag += 'Програма в нестандартному шляху' }
-        [pscustomobject]@{ Name = $r.Name; DisplayName = $r.DisplayName; Direction = [string]$r.Direction; Action = [string]$r.Action; Profile = [string]$r.Profile
+        [pscustomobject]@{ Name = $r.Name; DisplayName = $r.DisplayName; Enabled = [string]$r.Enabled; Direction = [string]$r.Direction; Action = [string]$r.Action; Profile = [string]$r.Profile
             Protocol = $proto; LocalPort = $lp; RemotePort = $rp; RemoteAddress = $ra; Program = $prog; Group = $r.Group; Flags = ($flag -join '; ') }
     }
-    $D.FwRules = Arr $rows
+    $D.FwRulesAll = Arr $rows
+    $D.FwRules = Arr ($rows | Where-Object { $_.Enabled -eq 'True' })   # прапорці — лише для активних
+    Save-Csv $D.FwRulesAll '04_firewall\fw_rules_all.csv'
     Save-Csv $D.FwRules '04_firewall\fw_rules_enabled.csv'
 }
 
@@ -1203,12 +1342,17 @@ Invoke-Step "2.8 Журнали подій: розмір, заповненіст
         'Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational' = 128
         'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational' = 128
         'Microsoft-Windows-Windows Firewall With Advanced Security/Firewall' = 128
+        # 0 = довідково: показуються в таблиці стабільності, але без рекомендацій розміру і без прапорців
+        'Microsoft-Windows-WMI-Activity/Operational' = 0; 'Microsoft-Windows-WinRM/Operational' = 0; 'Microsoft-Windows-Bits-Client/Operational' = 0
+        'Microsoft-Windows-SMBServer/Security' = 0; 'Microsoft-Windows-NTLM/Operational' = 0; 'Microsoft-Windows-TerminalServices-RDPClient/Operational' = 0
+        'Directory Service' = 0; 'DNS Server' = 0
     }
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($name in $recMB.Keys) {
         $l = $null
         try { $l = Get-WinEvent -ListLog $name -ErrorAction Stop } catch {
-            $rows.Add([pscustomobject]@{ Log = $name; Exists = $false; Enabled = ''; Mode = ''; MaxMB = ''; SizeMB = ''; FillPct = ''; Records = ''; OldestLocal = ''; HistoryDays = ''
+            if ($recMB[$name] -eq 0) { continue }   # довідкового каналу немає на цій ролі (напр. DNS Server не на DC) — не шум
+            $rows.Add([pscustomobject]@{ Log = $name; Exists = $false; Enabled = ''; Mode = ''; MaxMB = ''; SizeMB = ''; FillPct = ''; Records = ''; Events24h = ''; OldestLocal = ''; HistoryDays = ''
                 RecommendedMB = $recMB[$name]; Severity = $(if ($name -like '*Sysmon*') { 'Середньо' } else { 'Інфо' })
                 Advice = $(if ($name -like '*Sysmon*') { 'Sysmon не встановлено — немає деталізації процесів/мережі/файлів (рекомендовано Sysmon + конфіг SwiftOnSecurity/Olaf Hartong)' } else { 'Журнал відсутній на цій системі' }) })
             continue
@@ -1217,12 +1361,20 @@ Invoke-Step "2.8 Журнали подій: розмір, заповненіст
         if ($l.RecordCount -gt 0) { try { $oldest = (Get-WinEvent -LogName $name -Oldest -MaxEvents 1 -ErrorAction Stop).TimeCreated } catch {} }
         $size = [int64]$l.FileSize; $max = [int64]$l.MaximumSizeInBytes
         $a = Get-LogAdvice -Name $name -Enabled ([bool]$l.IsEnabled) -Mode ([string]$l.LogMode) -MaxBytes $max -SizeBytes $size -Oldest $oldest -RecBytes ([int64]$recMB[$name] * 1MB) -WindowStart $Since
+        $sev = $a.Severity; if ($recMB[$name] -eq 0) { $sev = 'Інфо' }   # довідкові канали (NTLM/Operational часто вимкнено штатно) — без прапорців
+        $e24 = $null; if ($l.IsEnabled -and $l.RecordCount -gt 0) { $e24 = Get-LogEvents24h $name $RunStart }
         $rows.Add([pscustomobject]@{ Log = $name; Exists = $true; Enabled = $l.IsEnabled; Mode = [string]$l.LogMode
             MaxMB = [math]::Round($max / 1MB, 1); SizeMB = [math]::Round($size / 1MB, 1); FillPct = $(if ($max) { [math]::Round(100 * $size / $max) } else { '' })
-            Records = $l.RecordCount; OldestLocal = (L $oldest); HistoryDays = $a.HistoryDays; RecommendedMB = $recMB[$name]; Severity = $a.Severity; Advice = $a.Advice })
+            Records = $l.RecordCount; Events24h = $e24; OldestLocal = (L $oldest); HistoryDays = $a.HistoryDays; RecommendedMB = $(if ($recMB[$name]) { $recMB[$name] } else { '' }); Severity = $sev; Advice = $a.Advice })
     }
     $D.LogHealth = Arr $rows
     Save-Csv $D.LogHealth '02_system\eventlog_health.csv'
+    # Повний перелік каналів журналів системи (не лише ключових) — що взагалі пишеться на цьому хості
+    $D.LogInventory = Arr (@(Get-WinEvent -ListLog * -ErrorAction SilentlyContinue) | ForEach-Object {
+        [pscustomobject]@{ Log = $_.LogName; Enabled = $_.IsEnabled; Mode = [string]$_.LogMode; Records = $_.RecordCount
+            SizeMB = [math]::Round([int64]$_.FileSize / 1MB, 2); MaxMB = [math]::Round([int64]$_.MaximumSizeInBytes / 1MB, 1); LastWriteUtc = (U $_.LastWriteTime) }
+    } | Sort-Object @{ Expression = { [int64]$_.Records }; Descending = $true })
+    Save-Csv $D.LogInventory '02_system\eventlog_inventory.csv'
 
     # Налаштування аудиту (auditpol /r дає CSV; Setting Value: 1=успіх, 2=відмова, 3=обидва)
     $aud = New-Object System.Collections.Generic.List[object]
@@ -1530,6 +1682,171 @@ if ($D.IsDC) {
         Save-Csv $D.AdObjects '02_system\ad_risky_accounts.csv'
     }
 } else { Add-Note 'Хост не є контролером домену — кроки аудиту Active Directory (2.10, 3.10) пропущено.' }
+
+# ════════════════════════════════════ 2.11 ВИДИМІСТЬ ЗА КАТЕГОРІЯМИ ПОДІЙ ════════════════════════════════════
+# Для кожної категорії: чи пишеться вона (auditpol / канал / політика) і скільки подій реально є за 24 год до збору.
+# «НЕ бачимо» = атаку цієї категорії на хості не буде видно в журналах, хоч би що сталося.
+Invoke-Step "2.11 Видимість за категоріями подій (auditpol + фактичні події за 24 год)" {
+    $nf = [Globalization.CultureInfo]::GetCultureInfo('uk-UA').NumberFormat
+    $bitsTxt = @{ 0 = 'Немає аудиту'; 1 = 'Успіх'; 2 = 'Відмова'; 3 = 'Успіх і відмова' }
+    $audCache = @{}
+    $rows = New-Object System.Collections.Generic.List[object]
+    function Get-AudState {   # @(@{ G = '9215'; R = 1..3; N = 'Logon' }) -> En ($true/$false/$null), Partial, Off (явно вимкнено), Text
+        param([object[]]$Subs)
+        $on = 0; $part = 0; $unk = 0; $txt = @()
+        foreach ($s in $Subs) {
+            $guid = '{0CCE' + $s.G + '-69AE-11D9-BED3-505054503030}'
+            if (-not $audCache.ContainsKey($guid)) { $audCache[$guid] = Get-AuditSubcategory $guid }
+            $a = $audCache[$guid]
+            if ($null -eq $a.Value) { $unk++; $txt += ("Аудит «{0}»: не вдалося прочитати" -f $s.N); continue }
+            $v = [int]$a.Value
+            if (($v -band $s.R) -eq $s.R) { $on++ } elseif ($v -band $s.R) { $part++ }
+            $t = ("Аудит «{0}»: {1}" -f $s.N, $bitsTxt[$v]); if (($v -band $s.R) -ne $s.R) { $t += (" (потрібно: {0})" -f $bitsTxt[[int]$s.R]) }
+            $txt += $t
+        }
+        $n = @($Subs).Count
+        $en = $null; $pa = $false
+        if ($unk -eq $n) { $en = $null } elseif ($on -eq $n) { $en = $true } elseif ($on + $part -gt 0) { $en = $true; $pa = $true } else { $en = $false }
+        return [pscustomobject]@{ En = $en; Partial = $pa; Off = ($on + $part -eq 0 -and $unk -eq 0); Text = ($txt -join '; ') }
+    }
+    function Get-ChanState {   # канали журналів: усі увімкнені -> $true; частина -> Partial; жодного -> $false
+        param([string[]]$Logs, [string]$AbsentText = '')
+        $on = 0; $txt = @()
+        foreach ($l in $Logs) {
+            $li = $null; try { $li = Get-WinEvent -ListLog $l -ErrorAction Stop } catch {}
+            if (-not $li) { $txt += $(if ($AbsentText) { $AbsentText } else { "канал $l відсутній" }) }
+            elseif (-not $li.IsEnabled) { $txt += "канал $l ВИМКНЕНО" }
+            else { $on++ }
+        }
+        $en = $false; if ($on -eq @($Logs).Count) { $en = $true } elseif ($on) { $en = $true }
+        if ($en -and -not $txt.Count) { $txt += $(if (@($Logs).Count -gt 1) { 'канали увімкнені' } else { 'канал увімкнено' }) }
+        return [pscustomobject]@{ En = $en; Partial = ($on -and $on -lt @($Logs).Count); Off = ($on -eq 0); Text = ($txt -join '; ') }
+    }
+    function Get-PolVal { param([string]$Key, [string]$Name) try { return (Get-ItemProperty -LiteralPath $Key -Name $Name -ErrorAction Stop).$Name } catch { return $null } }
+    function Get-VisCount { param([string]$L, [int[]]$I) return (Get-EventIdCount24h $L $I $RunStart) }
+    function Add-Vis {
+        param([string]$Cat, [string]$Ids, [string]$Src, $St, [object[]]$Cnt, [string]$Extra = '', $OffEvents = $null, [switch]$NoCount)
+        $tot = $null; $by = @{}; $cap = $false
+        foreach ($c in @($Cnt | Where-Object { $null -ne $_ })) {
+            $tot = [int64]$tot + [int64]$c.Total; if ($c.Capped) { $cap = $true }
+            foreach ($k in $c.ById.Keys) { if ($by.ContainsKey($k)) { $by[$k] += $c.ById[$k] } else { $by[$k] = $c.ById[$k] } }
+        }
+        $status = Get-VisibilityStatus -Enabled $St.En -Partial ([bool]$St.Partial) -Events $tot
+        $cm = @(); if ($St.Text) { $cm += $St.Text }
+        $byTxt = (@($by.Keys | Sort-Object | ForEach-Object { "{0}: {1}" -f $_, ([int64]$by[$_]).ToString('N0', $nf) }) -join ', ')
+        if (-not $NoCount) {
+            if ($null -eq $tot) { if ($St.En -ne $false) { $cm += 'подій порахувати не вдалося (канал недоступний)' } }
+            elseif ($tot -eq 0) { $cm += 'за добу подій не зафіксовано' }
+            else {
+                $t = ("{0}{1} под. за добу" -f $(if ($cap) { '≥ ' } else { '' }), $tot.ToString('N0', $nf))
+                if ($by.Count -gt 1) { $t += " ($byTxt)" }
+                $cm += $t
+            }
+        }
+        $changed = ($null -ne $OffEvents -and [int64]$OffEvents -gt 0)
+        if ($changed) { $cm += 'аудит зараз вимкнено, але події за добу є — політику аудиту змінено протягом доби?' }
+        if ($Extra) { $cm += $Extra }
+        $txt = ''   # речення з великої літери; після «?» крапку не додаємо
+        foreach ($part in $cm) { $part = ([string]$part).Trim(); if (-not $part) { continue }; $part = $part.Substring(0, 1).ToUpper() + $part.Substring(1)
+            if ($txt) { $txt += $(if ($txt -match '[.?!]$') { ' ' } else { '. ' }) }; $txt += $part }
+        $rows.Add([pscustomobject][ordered]@{ Category = $Cat; EventIds = $Ids; Source = $Src; Status = $status; Comment = $txt
+            Events24h = $(if ($null -eq $tot) { '' } elseif ($cap) { "≥$tot" } else { $tot }); ById = ($byTxt -replace ',', ';'); AuditChanged = $changed })
+    }
+    # Категорія лише з auditpol (Security): стан + лічильник + ознака «вимкнено, але події є»
+    function Add-AudVis {
+        param([string]$Cat, [int[]]$Ids, [object[]]$Subs, [string]$Extra = '', [switch]$Sacl)
+        $st = Get-AudState $Subs
+        if ($Sacl -and $st.En -eq $true) { $st.Partial = $true }
+        $c1 = Get-VisCount 'Security' $Ids
+        $off = $null; if ($st.Off -and $c1) { $off = $c1.Total }
+        Add-Vis $Cat ($Ids -join ' / ') 'Security' $st @($c1) $Extra $off
+    }
+    $pSec = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell'
+    $psOp = 'Microsoft-Windows-PowerShell/Operational'
+
+    # ── Вхід / вихід ──
+    Add-AudVis 'Успішний вхід' @(4624) @(@{ G = '9215'; R = 1; N = 'Logon' })
+    Add-AudVis 'Невдалий вхід' @(4625) @(@{ G = '9215'; R = 2; N = 'Logon' })
+    Add-AudVis 'Вхід з явними обліковими даними' @(4648) @(@{ G = '9215'; R = 1; N = 'Logon' })
+    Add-AudVis 'Привілейований вхід' @(4672) @(@{ G = '921B'; R = 1; N = 'Special Logon' })
+    Add-AudVis 'Вихід' @(4634, 4647) @(@{ G = '9216'; R = 1; N = 'Logoff' })
+    Add-AudVis 'Перевірка облікових даних (NTLM)' @(4776) @(@{ G = '923F'; R = 3; N = 'Credential Validation' })
+    $lsm = 'Microsoft-Windows-TerminalServices-LocalSessionManager/Operational'; $rcm = 'Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational'
+    Add-Vis 'RDP-сесії' '21 / 24 / 25 / 1149' 'TerminalServices' (Get-ChanState @($lsm, $rcm)) (@((Get-VisCount $lsm @(21, 24, 25)), (Get-VisCount $rcm @(1149))))
+    if ($D.IsDC) {
+        Add-AudVis 'Kerberos: TGT і попередня автентифікація' @(4768, 4771) @(@{ G = '9242'; R = 3; N = 'Kerberos Authentication Service' }) 'Потрібно для виявлення AS-REP roasting і password spraying'
+        Add-AudVis 'Kerberos: сервісні квитки' @(4769) @(@{ G = '9240'; R = 1; N = 'Kerberos Service Ticket Operations' }) 'Потрібно для виявлення Kerberoasting'
+        Add-AudVis 'Доступ до служби каталогів' @(4662) @(@{ G = '923B'; R = 1; N = 'Directory Service Access' }) 'Потрібно для виявлення DCSync; також потрібен SACL на об''єкті домену' -Sacl
+        Add-AudVis 'Зміни об''єктів AD' @(5136) @(@{ G = '923C'; R = 1; N = 'Directory Service Changes' })
+    }
+
+    # ── Виконання ──
+    $st = Get-AudState @(@{ G = '922B'; R = 1; N = 'Process Creation' })
+    $cmdOn = ((Get-PolVal 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit' 'ProcessCreationIncludeCmdLine_Enabled') -eq 1)
+    if ($st.En -eq $true -and -not $cmdOn) { $st.Partial = $true }
+    $c = @((Get-VisCount 'Security' @(4688))); $off = $null; if ($st.Off -and $c[0]) { $off = $c[0].Total }
+    Add-Vis 'Створення процесу' '4688' 'Security' $st $c $(if ($cmdOn) { 'Командний рядок у 4688 записується' } else { 'Командний рядок у 4688 НЕ записується' }) $off
+    $sm = 'Microsoft-Windows-Sysmon/Operational'
+    Add-Vis 'Процеси (Sysmon)' '1' 'Sysmon' (Get-ChanState @($sm) 'Sysmon не встановлено') (@((Get-VisCount $sm @(1)))) 'Основне джерело з повним командним рядком, hash і батьківським процесом'
+    Add-Vis 'Мережеві з''єднання (Sysmon)' '3' 'Sysmon' (Get-ChanState @($sm) 'Sysmon не встановлено') (@((Get-VisCount $sm @(3))))
+    $ch = Get-ChanState @($psOp)
+    $sbOn = ((Get-PolVal "$pSec\ScriptBlockLogging" 'EnableScriptBlockLogging') -eq 1)
+    $st = [pscustomobject]@{ En = ($ch.En -and $sbOn); Partial = $false; Text = $(if (-not $ch.En) { $ch.Text } elseif ($sbOn) { 'Script Block Logging увімкнено' } else { 'Script Block Logging вимкнено: Windows сама пише лише «підозрілі» блоки (Warning), решта не фіксується' }) }
+    Add-Vis 'PowerShell: команди (script blocks)' '4104' 'PowerShell/Operational' $st (@((Get-VisCount $psOp @(4104))))
+    $mlOn = ((Get-PolVal "$pSec\ModuleLogging" 'EnableModuleLogging') -eq 1)
+    $st = [pscustomobject]@{ En = ($ch.En -and $mlOn); Partial = $false; Text = $(if (-not $ch.En) { $ch.Text } elseif ($mlOn) { 'Module Logging увімкнено' } else { 'Module Logging вимкнено' }) }
+    Add-Vis 'PowerShell: модулі' '4103' 'PowerShell/Operational' $st (@((Get-VisCount $psOp @(4103))))
+    $trOn = ((Get-PolVal "$pSec\Transcription" 'EnableTranscripting') -eq 1); $trDir = Get-PolVal "$pSec\Transcription" 'OutputDirectory'
+    $st = [pscustomobject]@{ En = $trOn; Partial = $false; Text = $(if ($trOn) { "Transcription увімкнено; каталог: $(if ($trDir) { $trDir } else { 'Документи користувача (за замовчуванням)' })" } else { 'Transcription вимкнено' }) }
+    Add-Vis 'PowerShell: транскрипція' '—' 'Файлова система' $st @() -NoCount
+
+    # ── Персистентність ──
+    $st = Get-AudState @(@{ G = '9211'; R = 1; N = 'Security System Extension' }); $c = @((Get-VisCount 'Security' @(4697)), (Get-VisCount 'System' @(7045)))
+    $off = $null; if ($st.Off -and $c[0]) { $off = $c[0].Total }
+    if ($st.En -ne $true) { $st = [pscustomobject]@{ En = $true; Partial = $true; Text = $st.Text + '; 7045 у System пишеться завжди' } } else { $st.Text += '; 7045 у System пишеться завжди' }
+    Add-Vis 'Встановлення служби' '4697 / 7045' 'Security / System' $st $c '' $off
+    $ts = 'Microsoft-Windows-TaskScheduler/Operational'
+    $st = Get-AudState @(@{ G = '9227'; R = 1; N = 'Other Object Access Events' }); $c = @((Get-VisCount 'Security' @(4698, 4699, 4700, 4701, 4702)), (Get-VisCount $ts @(106, 140, 141)))
+    $off = $null; if ($st.Off -and $c[0]) { $off = $c[0].Total }
+    $tch = Get-ChanState @($ts)
+    if ($st.En -ne $true -and $tch.En) { $st = [pscustomobject]@{ En = $true; Partial = $true; Text = $st.Text + '; канал TaskScheduler/Operational увімкнено (106/140/141, без XML задачі)' } }
+    else { $st.Text += '; TaskScheduler/Operational: ' + $tch.Text }
+    Add-Vis 'Запланові задачі' '4698-4702 / 106 / 140 / 141' 'Security / TaskScheduler' $st $c '' $off
+
+    # ── Мережа і firewall ──
+    $fwAllow = @($D.FwProfiles | Where-Object { $_.LogAllowed -eq 'True' }).Count; $fwDrop = @($D.FwProfiles | Where-Object { $_.LogBlocked -eq 'True' }).Count
+    $st = Get-AudState @(@{ G = '9226'; R = 1; N = 'Filtering Platform Connection' }); $c = @((Get-VisCount 'Security' @(5156))); $off = $null; if ($st.Off -and $c[0]) { $off = $c[0].Total }
+    $x = ''; if ($st.En -ne $true) { $x = 'Часто вимкнено свідомо (дуже великий обсяг)'; if ($fwAllow) { $st = [pscustomobject]@{ En = $true; Partial = $true; Text = $st.Text + '; pfirewall.log пише дозволені з''єднання (LogAllowed)' } } }
+    Add-Vis 'Мережа: дозволені з''єднання' '5156' 'Security' $st $c $x $off
+    $st = Get-AudState @(@{ G = '9225'; R = 1; N = 'Filtering Platform Packet Drop' }, @{ G = '9226'; R = 2; N = 'Filtering Platform Connection' }); $c = @((Get-VisCount 'Security' @(5152, 5157))); $off = $null; if ($st.Off -and $c[0]) { $off = $c[0].Total }
+    if ($st.En -ne $true -and $fwDrop) { $st = [pscustomobject]@{ En = $true; Partial = $true; Text = $st.Text + '; pfirewall.log пише заблоковані (LogBlocked) — див. розділ firewall' } }
+    Add-Vis 'Мережа: заблоковані' '5152 / 5157' 'Security' $st $c '' $off
+    $fwc = 'Microsoft-Windows-Windows Firewall With Advanced Security/Firewall'
+    $st = Get-AudState @(@{ G = '9232'; R = 1; N = 'MPSSVC Rule-Level Policy Change' }); $c = @((Get-VisCount 'Security' @(4946, 4947, 4948)), (Get-VisCount $fwc @(2004, 2005, 2006, 2097)))
+    $off = $null; if ($st.Off -and $c[0]) { $off = $c[0].Total }
+    $fch = Get-ChanState @($fwc)
+    if ($st.En -ne $true -and $fch.En) { $st = [pscustomobject]@{ En = $true; Partial = $true; Text = $st.Text + '; канал Firewall (2004-2006/2097) увімкнено' } }
+    Add-Vis 'Зміни правил брандмауера' '4946-4948 / 2004-2006 / 2097' 'Security / Firewall' $st $c '' $off
+    Add-AudVis 'Доступ до спільних папок' @(5140, 5145) @(@{ G = '9224'; R = 1; N = 'File Share' }, @{ G = '9244'; R = 1; N = 'Detailed File Share' })
+
+    # ── Облікові записи, політики, журнали ──
+    Add-AudVis 'Керування користувачами' @(4720, 4722, 4724, 4725, 4726, 4738, 4740) @(@{ G = '9235'; R = 1; N = 'User Account Management' })
+    Add-AudVis 'Керування групами' @(4728, 4732, 4756) @(@{ G = '9237'; R = 1; N = 'Security Group Management' })
+    Add-AudVis 'Зміна політики аудиту' @(4719) @(@{ G = '922F'; R = 1; N = 'Audit Policy Change' }) 'Критична категорія: вимкнення аудиту зловмисником'
+    Add-Vis 'Очищення журналу' '1102 / 104' 'Security / System' ([pscustomobject]@{ En = $true; Partial = $false; Text = 'Пишеться завжди, незалежно від налаштувань аудиту' }) (@((Get-VisCount 'Security' @(1102)), (Get-VisCount 'System' @(104))))
+    Add-AudVis 'Доступ до файлів' @(4663) @(@{ G = '921D'; R = 1; N = 'File System' }) 'Події є лише для об''єктів із налаштованим SACL' -Sacl
+
+    # ── Захист і віддалене керування ──
+    $df = 'Microsoft-Windows-Windows Defender/Operational'
+    Add-Vis 'Defender: виявлення загроз' '1116 / 1117' 'Defender' (Get-ChanState @($df) 'канал Defender відсутній (Defender не встановлено?)') (@((Get-VisCount $df @(1116, 1117))))
+    $wmi = 'Microsoft-Windows-WMI-Activity/Operational'
+    Add-Vis 'WMI-активність' '5857 / 5858 / 5860 / 5861' 'WMI-Activity' (Get-ChanState @($wmi)) (@((Get-VisCount $wmi @(5857, 5858, 5860, 5861)))) '5861 — постійні WMI-підписки (персистентність)'
+    $wrm = 'Microsoft-Windows-WinRM/Operational'
+    Add-Vis 'WinRM / PowerShell Remoting' '6 / 91' 'WinRM' (Get-ChanState @($wrm)) (@((Get-VisCount $wrm @(6, 91))))
+
+    $D.EventVisibility = Arr $rows
+    Save-Csv $D.EventVisibility '02_system\event_visibility.csv'
+}
 
 # ════════════════════════════════════ 3. ЖУРНАЛИ ПОДІЙ ЗА ВІКНО ════════════════════════════════════
 Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776, зміни облікових записів, очищення журналів" {
@@ -2187,6 +2504,9 @@ Invoke-Step "5.4 BAM/DAM (останній запуск виконуваних �
     $pdir = Join-Path $env:SystemRoot 'Prefetch'
     $pfAll = @(Get-ChildItem -LiteralPath $pdir -Filter '*.pf' -File -Force -ErrorAction SilentlyContinue)
     $D.PrefetchTotal = $pfAll.Count
+    $D.PrefetchAll = Arr ($pfAll | Sort-Object LastWriteTimeUtc -Descending | ForEach-Object {
+        [pscustomobject]@{ File = $_.Name; CreatedUtc = (U $_.CreationTimeUtc); ModifiedUtc = (U $_.LastWriteTimeUtc); SizeBytes = $_.Length; Match = (Test-KwMatch $_.Name) } })
+    Save-Csv $D.PrefetchAll '05_artifacts\prefetch_all.csv'
     $D.Prefetch = Arr ($pfAll | Where-Object { (Test-KwMatch $_.Name) } | ForEach-Object {
         [pscustomobject]@{ File = $_.Name; CreatedUtc = (U $_.CreationTimeUtc); ModifiedUtc = (U $_.LastWriteTimeUtc); Note = 'Created ≈ перший запуск, Modified ≈ останній запуск' } })
     Save-Csv $D.Prefetch '05_artifacts\prefetch_matches.csv'
@@ -2335,6 +2655,108 @@ if ($UsnJournal) {
     }
 }
 
+# ════════════════════════════════════ 5.10 СЛІДИ ЗАПУСКУ ════════════════════════════════════
+# «Чи запускали файл, хто і коли» — там, де Prefetch вимкнено (сервери), а 4688/Sysmon не налаштовано.
+# UserAssist і RunMRU — лише профілі із завантаженим кущем (користувач увійшов); ShimCache — для всієї системи;
+# Amcache — лише з -CollectHives: розбирається робоча копія копії, оригінал і верифікована копія не змінюються.
+Invoke-Step "5.10 Сліди запуску: UserAssist, RunMRU (Win+R), ShimCache, Amcache" {
+    $ua = New-Object System.Collections.Generic.List[object]
+    $mru = New-Object System.Collections.Generic.List[object]
+    $loaded = @(Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^S-1-5-21-[\d-]+$' })
+    foreach ($h in $loaded) {
+        $sid = $h.PSChildName; $user = Resolve-Sid $sid
+        $base = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer"
+        foreach ($g in @(Get-ChildItem -LiteralPath "$base\UserAssist" -ErrorAction SilentlyContinue)) {
+            $cnt = Get-Item -LiteralPath (Join-Path $g.PSPath 'Count') -ErrorAction SilentlyContinue
+            if (-not $cnt) { continue }
+            $kind = switch ($g.PSChildName.ToUpperInvariant()) { '{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}' { 'Програми' } '{F4E57C4B-2036-45F0-A9AB-443BCFE33D9F}' { 'Ярлики' } default { $g.PSChildName } }
+            foreach ($vn in $cnt.GetValueNames()) {
+                $name = ConvertFrom-Rot13 $vn
+                if ($name -match '^(UEME_CTLSESSION|UEME_CTLCUACount)') { continue }
+                $data = $cnt.GetValue($vn); if (-not ($data -is [byte[]])) { continue }
+                $u = ConvertFrom-UserAssistData $data
+                $path = Resolve-KnownFolderPath $name
+                $ua.Add([pscustomobject]@{ Profile = $user; Kind = $kind; Program = $path; RunCount = $u.RunCount; FocusCount = $u.FocusCount; FocusSeconds = $u.FocusSeconds
+                    LastRunUtc = (U $u.LastRunUtc); Match = (Test-KwMatch $path) })
+            }
+        }
+        $rk = Get-ItemProperty -LiteralPath "$base\RunMRU" -ErrorAction SilentlyContinue
+        if ($rk) {
+            $order = [string]$rk.MRUList; $i = 0
+            foreach ($ch in $order.ToCharArray()) {
+                $cmd = [string]$rk."$ch"; if (-not $cmd) { continue }
+                $cmd = $cmd -replace '\\1$', ''
+                $exe = Get-ExeFromCmd $cmd
+                $why = Get-ExecReason $exe $cmd ''
+                $mru.Add([pscustomobject]@{ Profile = $user; Order = $i; Command = $cmd; Reason = $why; Match = ((Test-KwMatch $cmd) -or (Test-IocIP $cmd)) })
+                $i++
+            }
+        }
+    }
+    $allProfiles = @($D.Profiles | Where-Object { $_.Exists }).Count
+    if ($allProfiles -gt $loaded.Count) { Add-Note ("UserAssist / RunMRU: прочитано {0} з {1} профілів — лише тих, чий куш NTUSER.DAT завантажено (користувач зараз увійшов)." -f $loaded.Count, $allProfiles) }
+    $D.UserAssist = Arr ($ua | Sort-Object @{ Expression = { -not $_.Match } }, @{ Expression = { $_.LastRunUtc }; Descending = $true })
+    $D.RunMru = Arr $mru
+    Save-Csv $D.UserAssist '05_artifacts\userassist.csv'
+    Save-Csv $D.RunMru '05_artifacts\runmru.csv'
+
+    # ShimCache (AppCompatCache): Windows пише його в реєстр при вимкненні — записи після останнього завантаження можуть бути відсутні
+    $sc = @()
+    $raw = $null; try { $raw = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache' -Name AppCompatCache -ErrorAction Stop).AppCompatCache } catch {}
+    if ($raw) {
+        $sc = @(ConvertFrom-ShimCache ([byte[]]$raw))
+        if (-not $sc.Count) { Add-Note ("ShimCache: формат не розпізано (заголовок 0x{0:X}) — підтримуються Windows 10/11 і Server 2016+." -f [BitConverter]::ToInt32([byte[]]$raw, 0)) }
+        Add-Custody 'READ_REGISTRY' 'AppCompatCache' 'OK' ("{0} байт, {1} записів" -f $raw.Length, $sc.Count)
+    } else { Add-Note 'ShimCache: значення AppCompatCache недоступне.' }
+    $D.ShimCache = Arr ($sc | ForEach-Object { [pscustomobject]@{ Order = $_.Order; Path = $_.Path; LastModifiedUtc = (U $_.LastModifiedUtc); PathClass = (Get-PathClass $_.Path); Match = (Test-KwMatch $_.Path) } })
+    Save-Csv $D.ShimCache '05_artifacts\shimcache.csv'
+
+    # Amcache: лише якщо -CollectHives уже зробив верифіковану копію. Робоча копія -> reg load -> читання -> reg unload -> видалення.
+    $am = @()
+    $amCopy = Join-Path $CaseDir '06_evidence_copies\hives\Amcache.hve'
+    if ($CollectHives -and (Test-Path -LiteralPath $amCopy)) {
+        $work = Join-Path ([IO.Path]::GetTempPath()) ("soc_amcache_{0}.hve" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+        $mount = 'SOC_Amcache_' + ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        Copy-Item -LiteralPath $amCopy -Destination $work -Force
+        $out = ((& reg.exe load "HKLM\$mount" $work 2>&1) | Out-String).Trim()
+        Add-Custody 'REG_LOAD_WORKCOPY' "HKLM\$mount" $(if ($LASTEXITCODE -eq 0) { 'OK' } else { 'FAIL' }) ("робоча копія Amcache (не оригінал і не верифікована копія): $out")
+        if ($LASTEXITCODE -eq 0) {
+            # Читаємо через .NET RegistryKey з явним Close(): ключі, відкриті провайдером PowerShell (Get-ChildItem HKLM:),
+            # тримають дескриптори, і reg unload тоді не спрацьовує (перевірено в CI)
+            $invRoot = $null
+            try {
+                $invRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("$mount\Root\InventoryApplicationFile")
+                if (-not $invRoot) { Add-Note 'Amcache: розділ Root\InventoryApplicationFile відсутній (стара версія Amcache).' }
+                else {
+                    foreach ($sn in $invRoot.GetSubKeyNames()) {
+                        $sk = $null
+                        try {
+                            $sk = $invRoot.OpenSubKey($sn); if (-not $sk) { continue }
+                            $sha1 = (([string]$sk.GetValue('FileId')) -replace '^0000', '').ToUpperInvariant()
+                            $path = [string]$sk.GetValue('LowerCaseLongPath')
+                            $am += [pscustomobject]@{ Path = $path; SHA1 = $sha1; Name = [string]$sk.GetValue('Name'); Publisher = [string]$sk.GetValue('Publisher')
+                                Version = [string]$sk.GetValue('Version'); LinkDate = [string]$sk.GetValue('LinkDate'); Size = [string]$sk.GetValue('Size')
+                                Match = (Test-KwMatch $path); IocSha1 = ($sha1 -and ($IocSha1 -contains $sha1)) }
+                        } catch { } finally { if ($sk) { $sk.Close() } }
+                    }
+                }
+            } catch { Add-Note "Amcache: не вдалося прочитати робочу копію: $($_.Exception.Message)" }
+            finally {
+                if ($invRoot) { $invRoot.Close() }
+                [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+                $u = ((& reg.exe unload "HKLM\$mount" 2>&1) | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 2; [GC]::Collect(); $u = ((& reg.exe unload "HKLM\$mount" 2>&1) | Out-String).Trim() }
+                Add-Custody 'REG_UNLOAD_WORKCOPY' "HKLM\$mount" $(if ($LASTEXITCODE -eq 0) { 'OK' } else { 'FAIL' }) $u
+                if ($LASTEXITCODE -ne 0) { Add-Note "Amcache: не вдалося відмонтувати HKLM\$mount — виконайте вручну: reg unload HKLM\$mount" }
+            }
+        } else { Add-Note "Amcache: reg load робочої копії не вдався ($out)." }
+        Remove-Item -LiteralPath $work -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath (Split-Path $work) -Filter ((Split-Path $work -Leaf) + '*') -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    } else { Add-Note 'Amcache не розбирався: потрібен -CollectHives (копія Amcache.hve через esentutl /vss).' }
+    $D.Amcache = Arr ($am | Sort-Object @{ Expression = { -not ($_.Match -or $_.IocSha1) } }, Path)
+    Save-Csv $D.Amcache '05_artifacts\amcache_files.csv'
+}
+
 # ════════════════════════════════════ 6. АНАЛІЗ ════════════════════════════════════
 Invoke-Step "6.1 Brute-force: зведення 4625 (ціль, джерело, кількість, перша/остання спроба)" {
     $bf = @($D.Ev4625) | Group-Object -Property TargetUser, SourceIP, Workstation, LogonType, CallerProcess | ForEach-Object {
@@ -2401,13 +2823,14 @@ Invoke-Step "6.3 IOC-матчі по всіх джерелах" {
     foreach ($r in @($D.RdpSummary | Where-Object { $_.IocIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = 'RDP-журнали'; Value = $r.SourceIP; Details = ("{0} → {1}" -f $r.FirstLocal, $r.LastLocal) }) }
     foreach ($r in @($D.KmsReg | Where-Object { $_.IocIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = 'Реєстр KMS'; Value = $r.Value; Details = "$($r.Key)\$($r.Name)" }) }
     foreach ($r in @($D.Ev4625 | Where-Object { Test-IocIPEq $_.SourceIP } | Select-Object -First 1)) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = '4625 IpAddress'; Value = $r.SourceIP; Details = 'є невдалі входи з цієї адреси' }) }
+    foreach ($r in @($D.Amcache | Where-Object { $_.IocSha1 })) { $h.Add([pscustomobject]@{ Type = 'SHA1'; Where = 'Amcache (файл був на диску / запускався)'; Value = $r.SHA1; Details = $r.Path }) }
     $D.IocHits = Arr $h
     Save-Csv $D.IocHits 'ioc_hits.csv'
 }
 
 Invoke-Step "6.4 Автоматичні прапорці (підказки для аналітика, не висновки)" {
     foreach ($r in @($D.LogCleared)) { Add-Flag 'Критично' 'Журнали' 'Очищення / зупинка журналу подій' ("{0} ({1}) {2}" -f $r.TimeLocal, $r.EventId, $r.Details) 'auth' }
-    foreach ($r in @($D.IocHits | Where-Object { $_.Type -eq 'SHA256' })) { Add-Flag 'Критично' 'IOC' ("Збіг IOC-hash: {0}" -f $r.Where) ("{0} — {1}" -f $r.Value, $r.Details) 'ioc' }
+    foreach ($r in @($D.IocHits | Where-Object { $_.Type -in 'SHA256', 'SHA1' })) { Add-Flag 'Критично' 'IOC' ("Збіг IOC-hash: {0}" -f $r.Where) ("{0} — {1}" -f $r.Value, $r.Details) 'ioc' }
     foreach ($r in @($D.IocHits | Where-Object { $_.Type -eq 'IP' })) { Add-Flag 'Високо' 'IOC' ("IOC IP {0} — {1}" -f $r.Value, $r.Where) $r.Details 'ioc' }
     foreach ($g in @($D.BruteForce | Where-Object { $_.Attempts -ge 10 })) {
         Add-Flag 'Високо' 'Автентифікація' ("Серія невдалих входів на '{0}' ×{1}" -f $g.TargetUser, $g.Attempts) ("{0} → {1} (лок.); IP={2}; WS={3}; {4}; {5}" -f $g.FirstLocal, $g.LastLocal, $g.SourceIP, $g.Workstation, $g.LogonType, $g.Statuses) 'auth'
@@ -2466,6 +2889,12 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     }
     $adGap = @($D.AdAudit | Where-Object { $_.OK -eq $false })
     if ($adGap.Count) { Add-Flag 'Середньо' 'Active Directory' ("Аудит AD неповний: {0} підкатегор." -f $adGap.Count) ((@($adGap | ForEach-Object { "{0} ({1})" -f $_.Subcategory, $_.Detects }) -join '; ') + ' — відсутність подій не доводить відсутність атаки') 'ad' }
+    foreach ($r in @($D.UserAssist | Where-Object { $_.Match })) { Add-Flag 'Середньо' 'Виконання' ("UserAssist: {0}" -f $r.Program) ("{0}; запусків {1}; останній {2}" -f $r.Profile, $r.RunCount, $r.LastRunUtc) 'traces' }
+    foreach ($r in @($D.RunMru | Where-Object { $_.Match -or $_.Reason -match 'Підозрілі|IOC' })) { Add-Flag 'Середньо' 'Виконання' ("RunMRU (Win+R): {0}" -f $r.Command) ("{0} — {1}" -f $r.Profile, $(if ($r.Reason) { $r.Reason } else { 'Збіг з маскою IOC' })) 'traces' }
+    foreach ($r in @($D.ShimCache | Where-Object { $_.Match })) { Add-Flag 'Середньо' 'Виконання' ("ShimCache: {0}" -f $r.Path) ("позиція {0}; дата зміни файлу {1} (це не час запуску)" -f $r.Order, $r.LastModifiedUtc) 'traces' }
+    foreach ($r in @($D.Amcache | Where-Object { $_.Match -and -not $_.IocSha1 })) { Add-Flag 'Середньо' 'Виконання' ("Amcache: {0}" -f $r.Path) ("SHA1 {0}; {1} {2}" -f $r.SHA1, $r.Publisher, $r.Version) 'traces' }
+    # Аудит зараз вимкнено, а події цієї категорії за добу є: політику аудиту змінили нещодавно (T1562.002?)
+    foreach ($v in @($D.EventVisibility | Where-Object { $_.AuditChanged })) { Add-Flag 'Середньо' 'Журнали' ("Аудит вимкнено, але за добу є події: {0} ({1})" -f $v.Category, $v.EventIds) $v.Comment 'logs' }
     $badAud = @($D.AuditSettings | Where-Object { $_.OK -eq $false })
     if ($badAud.Count) { Add-Flag 'Середньо' 'Аудит' ("Налаштування аудиту нижче рекомендованих: {0}" -f $badAud.Count) ((@($badAud | ForEach-Object { $_.Setting }) -join '; ')) 'system' }
     if ($D.PrefetchState -like '0*') { Add-Flag 'Інфо' 'Методологія' 'Prefetch вимкнено' 'Відсутність .pf — очікувана, не доказ відсутності запуску' 'integrity' }
@@ -2474,7 +2903,7 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     foreach ($n in @($Notes | Where-Object { $_ -like 'УВАГА*' })) { Add-Flag 'Середньо' 'Повнота даних' 'Вибірку журналу урізано лімітом -MaxEvents' $n 'integrity' }
     # Тестові IOC: прапорці, єдина підстава яких — збіг з маскою імені, знижуємо до «Інфо» (IOC-hash / IOC IP не чіпаємо)
     if ($UsingDefaultIoc) {
-        $maskTitles = '^(LNK на IOC|BAM: запуск|Видалено в кошик|Завантажено з інтернету|Згадки IOC в історії)'
+        $maskTitles = '^(LNK на IOC|BAM: запуск|Видалено в кошик|Завантажено з інтернету|Згадки IOC в історії|UserAssist: |ShimCache: |Amcache: )'
         foreach ($f in $Flags) {
             if ($f.Severity -ne 'Середньо') { continue }
             if ([string]$f.Evidence -match ' — Збіг з маскою IOC$' -or [string]$f.Finding -match $maskTitles) {
@@ -2499,6 +2928,8 @@ Invoke-Step "7.1 Єдиний timeline з усіх джерел" {
     foreach ($r in @($D.Exec)) { $m = ''; if ($r.Reason -match 'IOC|Підозрілі') { $m = 'bad' }; Add-TL $r.TimeUtc $r.Source 'Запуск' ("{0}  ← {1}" -f $r.CommandLine, $r.Parent) $r.User $m }
     foreach ($r in @($D.SysmonMisc)) { Add-TL $r.TimeUtc 'Sysmon' $r.EventId ("{0}: {1} ({2})" -f $r.Reason, $r.Target, $r.Image) $r.User 'warn' }
     foreach ($r in @($D.Ps4104)) { Add-TL $r.TimeUtc 'PowerShell' '4104' $r.Snippet '' 'warn' }
+    foreach ($r in @($D.UserAssist | Where-Object { $_.Match })) { Add-TL $r.LastRunUtc 'UserAssist' 'LastRun' ("{0} (запусків: {1})" -f $r.Program, $r.RunCount) $r.Profile 'warn' }
+    foreach ($r in @($D.ShimCache | Where-Object { $_.Match })) { Add-TL $r.LastModifiedUtc 'ShimCache' 'FileModified' ("Дата зміни файлу (не запуску): {0}" -f $r.Path) '' '' }
     foreach ($r in @($D.AdEvents | Where-Object { $_.Severity -ne 'Інфо' })) { Add-TL $r.TimeUtc 'Active Directory' ([string]$r.EventId) ("{0}: {1} {2} {3}" -f $r.Technique, $r.Target, $r.SourceIP, $r.Details) $r.Actor $(if ($r.Severity -in 'Критично', 'Високо') { 'bad' } else { 'warn' }) }
     foreach ($f in @(@($D.KnownFiles) + @($D.WideHigh) | Where-Object { $_.Exists })) {
         Add-TL $f.CreatedUtc 'Файл' 'Created' ("Створено: {0}" -f $f.Path) '' 'warn'
@@ -2619,12 +3050,56 @@ Invoke-Step "8. Формування HTML-звіту" {
     $S = New-Object System.Text.StringBuilder
     [void]$S.Append((Sec 'summary' '1. Огляд і автоматичні прапорці' ($cardsHtml + "<p class='muted'>Прапорці — підказки для аналітика, сформовані правилами скрипта. Висновки робить аналітик після перевірки кількох незалежних джерел (NIST 8.3).</p>" + $fl.ToString()) -Open -Count $FlagsSorted.Count))
 
-    $b = (KV $D.SysInfo) + (H3 'Відповідність NIST SP 800-86') + (HT $nist) +
+    $b0 = (KV $D.SysInfo) + (H3 'Відповідність NIST SP 800-86') + (HT $nist) +
          (H3 'Верифікація копій доказів (hash до / копія / після)') + (HT $Integrity -Csv 'integrity_copies.csv' -RowClass { param($r) if ($r.Status -like 'VERIFIED*') { 'good' } elseif ($r.Status -like 'УВАГА*' -or $r.Status -like 'НЕ*') { 'bad' } else { 'info' } }) +
          (H3 'Файли, у яких змінився LastAccessTime після читання' 'Очікувано, якщо NTFS last-access увімкнено. Значення ДО читання збережено.') + (HT $atime -Cols @('Path', 'AccessedUtc_Before', 'AccessedUtc_After')) +
          (H3 'Обмеження та примітки збору') + $(if ($Notes.Count) { '<ul>' + ((@($Notes) | ForEach-Object { "<li>$(E $_)</li>" }) -join '') + '</ul>' } else { "<p class='empty'>Немає.</p>" }) +
          (H3 'Кроки збору') + (HT $StepLog -RowClass { param($r) if ($r.Status -ne 'OK') { 'bad' } })
-    [void]$S.Append((Sec 'integrity' '2. Цілісність, методологія, обмеження (NIST)' $b))
+    # ── 1.1 Стабільність надходження логів: компактна таблиця + ключові показники ──
+    $ukNum = [Globalization.CultureInfo]::GetCultureInfo('uk-UA').NumberFormat
+    $fmtN = { param($v) if ($null -eq $v -or [string]$v -eq '') { '—' } elseif ([string]$v -like '≈*') { '≈ ' + ([int64]([string]$v).TrimStart('≈')).ToString('N0', $ukNum) } else { ([int64]$v).ToString('N0', $ukNum) } }
+    $lh = @($D.LogHealth | Where-Object { $_.Exists -eq $true })
+    $lhRows = @($lh | Sort-Object @{ Expression = { if ($_.Enabled -eq $true) { 0 } else { 1 } } }, @{ Expression = { [int64]$(if ($_.Events24h) { ([string]$_.Events24h).TrimStart('≈') } else { 0 }) }; Descending = $true } | ForEach-Object {
+        $off = ($_.Enabled -ne $true)
+        [pscustomobject][ordered]@{
+            'Канал' = $_.Log
+            'Подій / 24 год' = $(if ($off) { 'канал ВИМКНЕНО' } else { & $fmtN $_.Events24h })
+            'Всього записів' = $(if ($off -and -not $_.Records) { '—' } else { & $fmtN $_.Records })
+            'Розмір, МБ (макс.)' = $_.MaxMB
+            'Заповнено, %' = $_.FillPct
+            'Історія, дн.' = $(if ($null -ne $_.HistoryDays -and [string]$_.HistoryDays -ne '') { $_.HistoryDays } else { '—' })
+            'Режим' = $(if ($off) { '—' } else { $_.Mode })
+            'Стан' = $(if ($off) { 'ВИМКНЕНО' } elseif ($_.Advice -match 'НЕ ПОКРИТЕ') { 'Вікно не покрите' } elseif ($_.Severity -in 'Високо', 'Середньо') { 'Потребує уваги' } else { 'OK' })
+            '_sev' = $_.Severity; '_off' = $off
+        } })
+    $absent = @($D.LogHealth | Where-Object { $_.Exists -ne $true } | ForEach-Object { $_.Log })
+    $sec = @($lh | Where-Object { $_.Log -eq 'Security' } | Select-Object -First 1)
+    $sm = @($lh | Where-Object { $_.Log -like '*Sysmon*' } | Select-Object -First 1)
+    $audGet = { param($n) $x = @($D.AuditSettings | Where-Object { $_.Setting -eq $n } | Select-Object -First 1); if ($x.Count) { $x[0].Current } else { 'невідомо' } }
+    $kvObj = [pscustomobject][ordered]@{
+        'Момент зрізу (подій / 24 год — до цього часу)' = ("{0} (лок.) / {1}" -f $RunStart.ToString('yyyy-MM-dd HH:mm'), (U $RunStart))
+        'Security: глибина історії' = $(if ($sec.Count) { "{0} дн. (з {1})" -f $sec[0].HistoryDays, $sec[0].OldestLocal } else { 'журнал недоступний' })
+        'Вікно розслідування покрите Security' = $(if (-not $sec.Count) { 'невідомо' } elseif ($sec[0].Advice -match 'НЕ ПОКРИТЕ') { 'НІ — частину подій уже перезаписано' } else { 'так' })
+        'Sysmon' = $(if ($sm.Count) { "встановлено; історія {0} дн." -f $sm[0].HistoryDays } else { 'не встановлено' })
+        'PowerShell Script Block Logging (4104)' = (& $audGet 'PowerShell Script Block Logging (4104)')
+        'Командний рядок у 4688' = (& $audGet 'Командний рядок у 4688')
+        'Вимкнені ключові канали' = $(if (@($lhRows | Where-Object { $_._off }).Count) { (@($lhRows | Where-Object { $_._off } | ForEach-Object { $_.'Канал' }) -join ', ') } else { 'немає' })
+        'Канали, яких немає в системі' = $(if ($absent.Count) { $absent -join ', ' } else { 'немає' })
+        'Усього каналів у системі / з подіями / увімкнено' = ("{0} / {1} / {2}" -f @($D.LogInventory).Count, @($D.LogInventory | Where-Object { [int64]$_.Records -gt 0 }).Count, @($D.LogInventory | Where-Object { $_.Enabled -eq $true }).Count)
+    }
+    $b = (H3 ("Обсяг подій за останні 24 години (за станом на {0})" -f $RunStart.ToString('dd.MM.yyyy HH:mm')) 'Подій / 24 год — точний підрахунок за часом події; «≈» — оцінка за номерами записів для дуже великих каналів (понад 100 000 за добу). Повні дані: 02_system\eventlog_health.csv; усі канали системи — розділ 4.') +
+         (HT ($lhRows | Select-Object 'Канал', 'Подій / 24 год', 'Всього записів', 'Розмір, МБ (макс.)', 'Заповнено, %', 'Історія, дн.', 'Режим', 'Стан', '_sev', '_off') -Cols @('Канал', 'Подій / 24 год', 'Всього записів', 'Розмір, МБ (макс.)', 'Заповнено, %', 'Історія, дн.', 'Режим', 'Стан') -RowClass { param($r) if ($r._off) { 'bad' } elseif ($r.'Стан' -eq 'Вікно не покрите') { 'bad' } elseif ($r._sev -in 'Високо', 'Середньо') { 'warn' } }) +
+         (H3 'Показник / Значення') + (KV $kvObj)
+    # ── 1.2 Видимість за категоріями подій (крок 2.11) ──
+    $vis = @($D.EventVisibility)
+    if ($vis.Count) {
+        $vsum = (@('Бачимо', 'Частково', 'НЕ бачимо', 'Невідомо') | ForEach-Object { $st = $_; "{0}: {1}" -f $st, @($vis | Where-Object { $_.Status -eq $st }).Count }) -join ' · '
+        $visRows = @($vis | ForEach-Object { [pscustomobject][ordered]@{ 'Категорія' = $_.Category; 'Event ID' = $_.EventIds; 'Джерело' = $_.Source; 'Статус' = $_.Status; 'Коментар' = $_.Comment } })
+        $b += (H3 '1.2 Перевірка видимості за категоріями подій' ("Для кожної категорії: стан підкатегорії аудиту за auditpol (або каналу / політики) і фактична кількість подій за 24 години до зрізу. «НЕ бачимо» — атаку цієї категорії журнали не покажуть. {0}" -f $vsum)) +
+              (HT $visRows -Csv '02_system\event_visibility.csv' -RowClass { param($r) if ($r.'Статус' -eq 'Бачимо') { 'good' } elseif ($r.'Статус' -eq 'НЕ бачимо') { 'bad' } else { 'warn' } })
+    }
+    [void]$S.Append((Sec 'logs' '1.1 Стабільність надходження логів' $b -Open -Count (@($lhRows | Where-Object { $_._off -or $_.'Стан' -ne 'OK' }).Count + @($vis | Where-Object { $_.Status -eq 'НЕ бачимо' }).Count)))
+    [void]$S.Append((Sec 'integrity' '2. Цілісність, методологія, обмеження (NIST)' $b0))
 
     $b = (H3 'Процеси' 'Підсвічено: непідписані поза системними каталогами, нестандартні шляхи, IOC.') + (HT ($D.Procs | Sort-Object @{ Expression = { -not $_.Flags } }, Name) -Cols @('PID', 'PPID', 'ParentName', 'Name', 'Owner', 'StartUtc', 'Path', 'CommandLine', 'Signature', 'Location', 'SHA256', 'Flags') -RowClass $rcFlag -Csv '01_volatile\processes.csv') +
          (H3 "TCP-з'єднання") + (HT $D.Tcp -Cols @('State', 'LocalAddress', 'LocalPort', 'RemoteAddress', 'RemotePort', 'PID', 'Process', 'Signature', 'RemoteIsPublic', 'IocIP', 'CreatedLocal') -RowClass $rcIoc -Csv '01_volatile\tcp_connections.csv') +
@@ -2641,7 +3116,9 @@ Invoke-Step "8. Формування HTML-звіту" {
          (H3 'Налаштування аудиту та логування' 'Колонка Fix — готова команда/політика для виправлення.') +
          (HT $D.AuditSettings -Csv '02_system\audit_settings_check.csv' -RowClass { param($r) if ($r.OK -eq $false) { 'warn' } elseif ($r.OK -eq $true) { 'good' } }) +
          (H3 'Профілі користувачів') + (HT $D.Profiles) + (H3 'Локальні облікові записи') + (HT $D.LocalUsers) + (H3 'Адміністратори') + (HT $D.LocalAdmins) +
-         (H3 'Політика облікових записів (net accounts)') + (Pre $D.NetAccounts) + (H3 'Audit policy (auditpol)') + (Pre $D.AuditPol)
+         (H3 'Політика облікових записів (net accounts)') + (Pre $D.NetAccounts) + (H3 'Audit policy (auditpol)') + (Pre $D.AuditPol) +
+         (H3 ("Усі канали журналів подій системи ({0})" -f @($D.LogInventory).Count) 'Що взагалі пишеться на цьому хості; відсортовано за кількістю записів.') +
+         (HT $D.LogInventory -Csv '02_system\eventlog_inventory.csv' -RowClass { param($r) if ($r.Enabled -ne $true) { 'off' } })
     [void]$S.Append((Sec 'system' '4. Система, журнали, аудит, облікові записи' $b -Count @($D.LogHealth | Where-Object { $_.Severity -in 'Високо','Середньо' }).Count))
     $b = (H3 'Аудит конфігурації безпеки' 'Не «що сталося», а «наскільки хост вразливий». Колонка Fix — команда або політика для виправлення; Why — чим це загрожує.') +
          (HT $D.Hardening -Cols @('Status', 'Severity', 'Area', 'Check', 'Current', 'Recommended', 'Fix', 'Why') -Csv '02_system\security_config_audit.csv' -RowClass { param($r) if ($r.Status -eq 'Ризик' -and $r.Severity -eq 'Високо') { 'bad' } elseif ($r.Status -eq 'Ризик') { 'warn' } elseif ($r.Status -eq 'OK') { 'good' } }) +
@@ -2678,7 +3155,9 @@ Invoke-Step "8. Формування HTML-звіту" {
     [void]$S.Append((Sec 'services' '7. Служби' $b -Count @($D.SvcEvents).Count))
 
     $b = (H3 'Сторонні / підозрілі задачі (поточний стан)' 'Поле Author — безпосередньо з XML задачі (первинне джерело).') + (HT $D.Tasks -RowClass $rcFlag -Csv '02_system\scheduled_tasks_nonms_or_suspicious.csv') +
-         (H3 'Події задач за вікно') + (HT $D.TaskEvents -Csv '03_eventlogs\task_events.csv' -RowClass { param($r) if ($r.Match) { 'bad' } elseif ($r.EventId -eq 4698) { 'warn' } })
+         (H3 'Події задач за вікно') + (HT $D.TaskEvents -Csv '03_eventlogs\task_events.csv' -RowClass { param($r) if ($r.Match) { 'bad' } elseif ($r.EventId -eq 4698) { 'warn' } }) +
+         (H3 ("Усі задачі планувальника — повний перелік ({0})" -f @($D.TasksAll).Count) 'Включно зі штатними \Microsoft\. Suspicious = True — ті, що вище з прапорцями.') +
+         (HT $D.TasksAll -Cols @('TaskPath', 'TaskName', 'State', 'Author', 'RunAs', 'Actions', 'LastRunUtc', 'LastResult', 'Suspicious') -Csv '02_system\scheduled_tasks_all.csv' -RowClass { param($r) if ($r.Suspicious -eq $true) { 'warn' } })
     [void]$S.Append((Sec 'tasks' '8. Задачі планувальника' $b -Count @($D.Tasks).Count))
 
     $b = (H3 'Run / Winlogon / IFEO / Startup') + (HT $D.Autoruns -Csv '02_system\autoruns.csv' -RowClass { param($r) if ($r.Match -or $r.PathClass -in @('Нестандартний', 'Користувацький/тимчасовий', 'НЕСТАНДАРТНЕ значення')) { 'warn' } }) +
@@ -2691,11 +3170,13 @@ Invoke-Step "8. Формування HTML-звіту" {
          (H3 'pfirewall.log: порти') + (HT $D.FwByPort -Csv '04_firewall\fw_log_by_port.csv') +
          (H3 'pfirewall.log: сирі записи з IOC IP') + (HT $D.FwIocRaw -Csv '04_firewall\fw_log_ioc_raw.csv') +
          (H3 'Активні правила з прапорцями') + (HT ($D.FwRules | Where-Object { $_.Flags }) -RowClass $rcFlag -Empty 'Немає.') +
-         (H3 'Усі активні правила') + (HT $D.FwRules -Csv '04_firewall\fw_rules_enabled.csv')
+         (H3 ("Усі правила, включно з вимкненими ({0}; активних {1})" -f @($D.FwRulesAll).Count, @($D.FwRules).Count) 'Колонка Enabled. Вимкнені рядки — сірим; прапорці рахуються лише для активних.') +
+         (HT $D.FwRulesAll -Cols @('Enabled', 'DisplayName', 'Direction', 'Action', 'Profile', 'Protocol', 'LocalPort', 'RemotePort', 'RemoteAddress', 'Program', 'Group', 'Flags') -Csv '04_firewall\fw_rules_all.csv' -RowClass { param($r) if ($r.Enabled -ne 'True') { 'off' } elseif ($r.Flags) { 'warn' } })
     [void]$S.Append((Sec 'firewall' '10. Firewall' $b -Count @($D.FwEvents).Count))
 
     $b = (H3 'Стан захисту') + (HT $D.MpStatusRows -RowClass { param($r) if ($r.Setting -eq 'RealTimeProtectionEnabled' -and $r.Value -eq 'False') { 'bad' } }) +
-         (H3 'Винятки') + (HT $D.MpExclusions -Empty 'Винятків не знайдено.' -RowClass { 'bad' }) + (H3 'Події Defender') + (HT $D.MpEvents -Csv '03_eventlogs\defender_events.csv' -RowClass { param($r) if ($r.EventId -in 5001, 1116, 1117 -or $r.Exclusion) { 'bad' } else { 'warn' } })
+         (H3 'Винятки') + (HT $D.MpExclusions -Empty 'Винятків не знайдено.' -RowClass { 'bad' }) + (H3 'Події Defender') + (HT $D.MpEvents -Csv '03_eventlogs\defender_events.csv' -RowClass { param($r) if ($r.EventId -in 5001, 1116, 1117 -or $r.Exclusion) { 'bad' } else { 'warn' } }) +
+         (H3 'Повний стан і налаштування Defender' 'Усі властивості Get-MpComputerStatus і Get-MpPreference.') + (HT $D.MpFull -Csv '02_system\defender_full.csv' -Empty 'Defender недоступний (інший AV?).')
     [void]$S.Append((Sec 'defender' '11. Microsoft Defender' $b -Count @($D.MpExclusions).Count))
 
     $b = (H3 'Продукти з ключем' 'EstLastKmsActivationUtc — оцінка: KMS-активація дійсна 180 діб, час = зараз − (180 діб − залишок).') + (HT $D.Licensing -Csv '02_system\licensing_products.csv') +
@@ -2705,6 +3186,15 @@ Invoke-Step "8. Формування HTML-звіту" {
     $b = (H3 'Запуски LOLBin / з IOC (Sysmon 1, 4688)') + (HT $D.Exec -Csv '03_eventlogs\process_exec_lolbin_ioc.csv' -RowClass { param($r) if ($r.Reason -match 'IOC|Підозрілі') { 'bad' } }) +
          (H3 'Sysmon 11/13/3 за IOC') + (HT $D.SysmonMisc -Csv '03_eventlogs\sysmon_file_reg_net_ioc.csv') + (H3 'PowerShell 4104') + (HT $D.Ps4104 -Csv '03_eventlogs\powershell_4104_suspicious.csv')
     [void]$S.Append((Sec 'exec' '13. Виконання процесів і скриптів' $b -Count @($D.Exec).Count))
+    $b = (H3 'UserAssist — запуски через Провідник / «Пуск» / ярлики' 'Лише профілі із завантаженим кущем (користувач увійшов). LastRunUtc — час останнього запуску.') +
+         (HT $D.UserAssist -Cols @('Profile', 'Kind', 'Program', 'RunCount', 'LastRunUtc', 'FocusSeconds', 'Match') -RowClass $rcMatch -Csv '05_artifacts\userassist.csv' -Empty 'Записів UserAssist немає.') +
+         (H3 'RunMRU — команди з вікна «Виконати» (Win+R)' 'Order 0 — найсвіжіша команда. Reason — чому команда підозріла.') +
+         (HT $D.RunMru -RowClass { param($r) if ($r.Match) { 'bad' } elseif ($r.Reason) { 'warn' } } -Csv '05_artifacts\runmru.csv' -Empty 'Команд RunMRU немає.') +
+         (H3 'ShimCache (AppCompatCache)' 'Файли, які система «бачила». На Windows 10+ це НЕ доказ запуску; дата — зміна файлу, не запуск. Order 0 — найсвіжіший запис. Оновлюється при вимкненні ОС.') +
+         (HT $D.ShimCache -RowClass $rcMatch -Csv '05_artifacts\shimcache.csv' -Empty 'ShimCache недоступний або формат не розпізано.') +
+         (H3 'Amcache — файли, що були на диску / запускались (шлях, SHA1)' 'Лише з -CollectHives. SHA1 можна шукати у VirusTotal і порівнювати з -IocSha1.') +
+         (HT $D.Amcache -Cols @('Path', 'SHA1', 'Publisher', 'Version', 'LinkDate', 'Match', 'IocSha1') -RowClass { param($r) if ($r.IocSha1 -or $r.Match) { 'bad' } } -Csv '05_artifacts\amcache_files.csv' -Empty 'Amcache не розбирався (потрібен -CollectHives).')
+    [void]$S.Append((Sec 'traces' '13.1 Сліди запуску (UserAssist, RunMRU, ShimCache, Amcache)' $b -Count (@($D.UserAssist | Where-Object { $_.Match }).Count + @($D.RunMru | Where-Object { $_.Reason -or $_.Match }).Count + @($D.ShimCache | Where-Object { $_.Match }).Count + @($D.Amcache | Where-Object { $_.Match -or $_.IocSha1 }).Count)))
 
     $b = (H3 'IOC-збіги') + (HT $D.IocHits -Csv 'ioc_hits.csv' -RowClass { 'bad' } -Empty 'IOC-збігів не знайдено.')
     [void]$S.Append((Sec 'ioc' '14. IOC-збіги' $b -Count @($D.IocHits).Count))
@@ -2715,6 +3205,7 @@ Invoke-Step "8. Формування HTML-звіту" {
          (H3 'LNK (Recent/Desktop)') + (HT $D.Lnk -RowClass $rcMatch -Csv '05_artifacts\lnk_recent_desktop.csv') +
          (H3 'BAM/DAM') + (HT $D.Bam -RowClass $rcMatch -Csv '05_artifacts\bam_dam.csv' -Empty 'Записів BAM/DAM немає (див. примітки).') +
          (H3 ("Prefetch — {0}; усього .pf: {1}" -f $D.PrefetchState, $D.PrefetchTotal)) + (HT $D.Prefetch -Empty 'Збігів у Prefetch немає.') +
+         (H3 ("Prefetch — усі файли ({0})" -f @($D.PrefetchAll).Count) 'Created ≈ перший запуск, Modified ≈ останній запуск.') + (HT $D.PrefetchAll -RowClass $rcMatch -Csv '05_artifacts\prefetch_all.csv' -Empty 'Prefetch порожній або вимкнений.') +
          (H3 'Кошик ($I)') + (HT $D.Recycle -RowClass $rcMatch -Csv '05_artifacts\recycle_bin.csv' -Empty 'Кошик порожній.') +
          (H3 'Zone.Identifier (Mark of the Web)') + (HT $D.Zone -RowClass $rcMatch -Csv '05_artifacts\zone_identifier.csv') +
          (H3 'Підказки з копій історії браузерів / Windows Timeline' 'Пошук рядків (URL/шляхи з ключовими словами) без SQLite — без часових міток.') + (HT $D.Hints -Csv '05_artifacts\evidence_string_hints.csv') +
@@ -2749,7 +3240,7 @@ summary h2{display:inline;font-size:17px;color:#1f3864;margin:0}summary:before{c
 .cnt{color:#6b7480;font-size:12px}.scroll{overflow:auto;max-height:560px;border:1px solid #e1e5eb;border-radius:8px}
 table{border-collapse:collapse;width:100%;font-size:12.5px;background:#fff}th{position:sticky;top:0;background:#1f3864;color:#fff;text-align:left;padding:7px 9px;font-weight:600;cursor:pointer;white-space:nowrap}
 td{padding:6px 9px;border-bottom:1px solid #e1e5eb;vertical-align:top;word-break:break-word;max-width:560px}tr:nth-child(even) td{background:#fafbfd}
-tr.bad td{background:#fde8e8}tr.warn td{background:#fff4e0}tr.good td{background:#eef8ee}tr.info td{background:#eef3fb}
+tr.off td{color:#8a929c;background:#f6f7f9}tr.bad td{background:#fde8e8}tr.warn td{background:#fff4e0}tr.good td{background:#eef8ee}tr.info td{background:#eef3fb}
 .sev{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;color:#fff;white-space:nowrap}.s0{background:#7f0000}.s1{background:#c62828}.s2{background:#b45309}.s3{background:#2f5496}
 pre{background:#0f1720;color:#dfe6ee;padding:12px;border-radius:8px;overflow:auto;max-height:420px;font-size:12px;white-space:pre-wrap}
 .empty{color:#7a838f;font-style:italic}.muted{color:#6b7480;font-size:12px;margin:4px 0}.kv td:first-child{font-weight:600;color:#44505e;width:300px;background:#f7f9fc}
@@ -2759,11 +3250,11 @@ footer{color:#7a838f;font-size:12px;text-align:center;padding:20px}@media print{
     $js = @'
 function flt(inp,id){var q=inp.value.toLowerCase();var rows=document.getElementById(id).tBodies[0].rows;for(var i=0;i<rows.length;i++){rows[i].style.display=rows[i].innerText.toLowerCase().indexOf(q)>-1?'':'none';}}
 function srt(th){var t=th.closest('table'),i=Array.prototype.indexOf.call(th.parentNode.children,th),b=t.tBodies[0],r=Array.prototype.slice.call(b.rows);var d=th.getAttribute('data-d')==='a'?'d':'a';th.setAttribute('data-d',d);
-r.sort(function(x,y){var a=x.cells[i].innerText,c=y.cells[i].innerText,na=parseFloat(a),nc=parseFloat(c);var v=(/^-?[\d.]+$/.test(a)&&/^-?[\d.]+$/.test(c))?na-nc:a.localeCompare(c);return d==='a'?v:-v;});r.forEach(function(x){b.appendChild(x);});}
+r.sort(function(x,y){var a=x.cells[i].innerText,c=y.cells[i].innerText,sa=a.replace(/[\s\u00a0\u202f]/g,'').replace(',','.'),sc=c.replace(/[\s\u00a0\u202f]/g,'').replace(',','.');var v=(/^-?[\d.]+$/.test(sa)&&/^-?[\d.]+$/.test(sc))?parseFloat(sa)-parseFloat(sc):a.localeCompare(c);return d==='a'?v:-v;});r.forEach(function(x){b.appendChild(x);});}
 '@
-    $navItems = @(@('summary', 'Огляд і прапорці'), @('integrity', 'Цілісність / NIST'), @('volatile', 'Волатильні дані'), @('system', 'Система'), @('hardening', 'Налаштування безпеки'), @('auth', 'Автентифікація'), @('ad', 'Active Directory'),
+     $navItems = @(@('summary', 'Огляд і прапорці'), @('logs', 'Стабільність логів'), @('integrity', 'Цілісність / NIST'), @('volatile', 'Волатильні дані'), @('system', 'Система'), @('hardening', 'Налаштування безпеки'), @('auth', 'Автентифікація'), @('ad', 'Active Directory'),
                   @('rdp', 'RDP'), @('services', 'Служби'), @('tasks', 'Задачі'), @('persist', 'Персистентність'), @('firewall', 'Firewall'), @('defender', 'Defender'),
-                  @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
+                  @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('traces', 'Сліди запуску'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
     $nav = (@($navItems | ForEach-Object { "<a href='#$($_[0])'>$(E $_[1])</a>" }) -join '')
     $iocBanner = ''
     if ($UsingDefaultIoc) { $iocBanner = "<div class='banner'><b>Використано тестові IOC за замовчуванням (кейс KMSAuto).</b> Жоден з -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths не передано — прапорці лише за збігом з маскою знижено до «Інфо» і позначено «[тестова маска]». Для розслідування запустіть з IOC своєї справи.</div>" }

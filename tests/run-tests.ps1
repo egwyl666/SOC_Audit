@@ -29,7 +29,7 @@ $fnAsts = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.F
 foreach ($f in $fnAsts) { . ([scriptblock]::Create($f.Extent.Text)) }
 
 # Верхньорівневі присвоєння, потрібні функціям
-$wantVars = 'Lolbins', 'TaskInterpreters', 'AdReplGuids', 'AdUacCodes', 'AdPrivGroupRx', 'NtStatus', 'LogonTypes'
+$wantVars = 'Lolbins', 'TaskInterpreters', 'KnownFolderGuids', 'AdReplGuids', 'AdUacCodes', 'AdPrivGroupRx', 'NtStatus', 'LogonTypes'
 foreach ($a in @($ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] })) {
     $left = $a.Left
     if ($left -is [System.Management.Automation.Language.VariableExpressionAst] -and $wantVars -contains $left.VariablePath.UserPath) { . ([scriptblock]::Create($a.Extent.Text)) }
@@ -126,6 +126,86 @@ try {
     Assert-True 'помилка auditpol -> невідомо' ($null -eq (ConvertFrom-AuditpolCsv @('Ошибка 0x00000057 произошла:', 'Параметр задан неверно.')).Value)
     Assert-True 'порожньо -> невідомо'    ($null -eq (ConvertFrom-AuditpolCsv @()).Value)
 
+    Test-Group 'Сліди запуску: ROT13, UserAssist, ShimCache (синтетичні байти)'
+    Assert-True 'ROT13'                   ((ConvertFrom-Rot13 'P:\Jvaqbjf\abgrcnq.rkr') -eq 'C:\Windows\notepad.exe')
+    Assert-True 'ROT13 двічі = оригінал'  ((ConvertFrom-Rot13 (ConvertFrom-Rot13 'Evil_Test.EXE 123')) -eq 'Evil_Test.EXE 123')
+    Assert-True 'KNOWNFOLDER System32'    ((Resolve-KnownFolderPath '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\cmd.exe') -eq '%SystemRoot%\System32\cmd.exe')
+    Assert-True 'KNOWNFOLDER невідомий — без змін' ((Resolve-KnownFolderPath '{00000000-0000-0000-0000-000000000000}\x.exe') -eq '{00000000-0000-0000-0000-000000000000}\x.exe')
+    $when = [DateTime]::new(2026, 9, 20, 10, 30, 0, [DateTimeKind]::Utc)
+    $ua72 = New-Object byte[] 72
+    [BitConverter]::GetBytes([int32]7).CopyTo($ua72, 4); [BitConverter]::GetBytes([int32]3).CopyTo($ua72, 8)
+    [BitConverter]::GetBytes([uint32]65000).CopyTo($ua72, 12); [BitConverter]::GetBytes($when.ToFileTimeUtc()).CopyTo($ua72, 60)
+    $u = ConvertFrom-UserAssistData $ua72
+    Assert-True 'UserAssist 72 байти: запуски' ($u.RunCount -eq 7 -and $u.FocusCount -eq 3 -and $u.FocusSeconds -eq 65)
+    Assert-True 'UserAssist 72 байти: час'     ($u.LastRunUtc -eq $when)
+    $ua16 = New-Object byte[] 16
+    [BitConverter]::GetBytes([int32]9).CopyTo($ua16, 4); [BitConverter]::GetBytes($when.ToFileTimeUtc()).CopyTo($ua16, 8)
+    $u = ConvertFrom-UserAssistData $ua16
+    Assert-True 'UserAssist 16 байт (XP): лічильник −5' ($u.RunCount -eq 4 -and $u.LastRunUtc -eq $when)
+    Assert-True 'UserAssist порожнє значення' ($null -eq (ConvertFrom-UserAssistData @()).LastRunUtc)
+    function New-ShimEntry { param([string]$Path, [datetime]$Mod)
+        $pb = [Text.Encoding]::Unicode.GetBytes($Path); $data = [byte[]](1, 2, 3)
+        $body = New-Object System.Collections.Generic.List[byte]
+        $body.AddRange([BitConverter]::GetBytes([uint16]$pb.Length)); $body.AddRange($pb); $body.AddRange([BitConverter]::GetBytes($Mod.ToFileTimeUtc()))
+        $body.AddRange([BitConverter]::GetBytes([uint32]$data.Length)); $body.AddRange($data)
+        $e = New-Object System.Collections.Generic.List[byte]
+        $e.AddRange([Text.Encoding]::ASCII.GetBytes('10ts')); $e.AddRange([BitConverter]::GetBytes([uint32]0x12345678)); $e.AddRange([BitConverter]::GetBytes([uint32]$body.Count)); $e.AddRange($body)
+        return ,$e.ToArray() }
+    foreach ($hdr in 0x30, 0x34) {
+        $blob = New-Object System.Collections.Generic.List[byte]
+        $h = New-Object byte[] $hdr; [BitConverter]::GetBytes([int32]$hdr).CopyTo($h, 0); $blob.AddRange($h)
+        $blob.AddRange((New-ShimEntry 'C:\Users\bob\Downloads\evil_test.exe' $when)); $blob.AddRange((New-ShimEntry 'C:\Windows\System32\notepad.exe' $when.AddDays(-30)))
+        $sc = @(ConvertFrom-ShimCache $blob.ToArray())
+        Assert-True "ShimCache (заголовок 0x$('{0:X}' -f $hdr)): 2 записи" ($sc.Count -eq 2)
+        Assert-True "ShimCache (заголовок 0x$('{0:X}' -f $hdr)): шлях і дата" ($sc[0].Path -eq 'C:\Users\bob\Downloads\evil_test.exe' -and $sc[0].LastModifiedUtc -eq $when -and $sc[1].Order -eq 1)
+    }
+    $bad = New-Object byte[] 128; [BitConverter]::GetBytes([int32]0x80).CopyTo($bad, 0)
+    Assert-True 'ShimCache: невідомий формат -> 0 записів' (@(ConvertFrom-ShimCache $bad).Count -eq 0)
+    $trunc = $blob.ToArray()[0..($blob.Count - 20)]
+    Assert-True 'ShimCache: обрізані дані -> без винятку, 1 запис' (@(ConvertFrom-ShimCache ([byte[]]$trunc)).Count -eq 1)
+
+    $onWin = ($PSVersionTable.PSEdition -ne 'Core') -or $IsWindows
+    if ($onWin) {
+        Test-Group 'Сліди запуску на цій Windows (реальні дані)'
+        $raw = $null; try { $raw = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache' -Name AppCompatCache -ErrorAction Stop).AppCompatCache } catch {}
+        if ($raw) {
+            $real = @(ConvertFrom-ShimCache ([byte[]]$raw))
+            Assert-True ("ShimCache цієї системи розібрано ({0} записів)" -f $real.Count) ($real.Count -gt 0)
+            Assert-True 'ShimCache: шляхи схожі на шляхи' (@($real | Where-Object { $_.Path -match '^(?i)([a-z]:\\|\\\\|SYSVOL\\|\\\?\?\\)' }).Count -ge [math]::Floor($real.Count * 0.8))
+        }
+        $cnt = @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist' -ErrorAction SilentlyContinue)
+        $okUa = $true
+        foreach ($g in $cnt) { $k = Get-Item -LiteralPath (Join-Path $g.PSPath 'Count') -ErrorAction SilentlyContinue; if (-not $k) { continue }
+            foreach ($vn in $k.GetValueNames()) { try { $null = ConvertFrom-UserAssistData ($k.GetValue($vn)) } catch { $okUa = $false } } }
+        Assert-True 'UserAssist поточного користувача читається без помилок' $okUa
+        $now = Get-Date
+        $e24 = Get-LogEvents24h 'System' $now
+        $cnt24 = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $now.AddHours(-24); EndTime = $now } -ErrorAction SilentlyContinue).Count
+        Assert-True ("Get-LogEvents24h System = {0}, прямий підрахунок = {1}" -f $e24, $cnt24) ($null -ne $e24 -and [string]$e24 -notlike '≈*' -and [math]::Abs([int64]$e24 - $cnt24) -le 2)
+        $top = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $now.AddHours(-24); EndTime = $now } -ErrorAction SilentlyContinue | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 2)
+        if ($top.Count -eq 2) {
+            $ids = @([int]$top[0].Name, [int]$top[1].Name)
+            $ec = Get-EventIdCount24h 'System' $ids $now
+            $direct = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = $ids; StartTime = $now.AddHours(-24); EndTime = $now } -ErrorAction SilentlyContinue).Count
+            Assert-True ("Get-EventIdCount24h System [{0}] = {1}, прямий підрахунок = {2}" -f ($ids -join ','), $(if ($ec) { $ec.Total } else { 'null' }), $direct) ($ec -and [math]::Abs([int64]$ec.Total - $direct) -le 2 -and $ec.ById.Count -eq 2 -and -not $ec.Capped)
+            Assert-True 'Get-EventIdCount24h: ліміт -> Capped' ((Get-EventIdCount24h 'System' $ids $now -Limit 1).Capped -eq ($direct -ge 1))
+        }
+        Assert-True 'Get-EventIdCount24h: неіснуючий канал -> null' ($null -eq (Get-EventIdCount24h 'SOC-Collect-No-Such/Log' @(1) $now))
+    }
+
+    Test-Group 'Видимість за категоріями подій'
+    $xp = Get-EventIdXPath @(4624, 4625) ([datetime]'2026-01-01T00:00:00Z') ([datetime]'2026-01-02T00:00:00Z')
+    Assert-True 'XPath: кілька ID через or' ($xp -like '*(EventID=4624 or EventID=4625) and TimeCreated*')
+    Assert-True 'XPath: без ID — лише час' ((Get-EventIdXPath @() (Get-Date).AddHours(-1) (Get-Date)) -notmatch 'EventID')
+    Assert-True 'увімкнено + події = Бачимо'        ((Get-VisibilityStatus $true $false 10) -eq 'Бачимо')
+    Assert-True 'увімкнено, 0 подій = Бачимо'      ((Get-VisibilityStatus $true $false 0) -eq 'Бачимо')
+    Assert-True 'частково = Частково'               ((Get-VisibilityStatus $true $true 5) -eq 'Частково')
+    Assert-True 'вимкнено, 0 = НЕ бачимо'           ((Get-VisibilityStatus $false $false 0) -eq 'НЕ бачимо')
+    Assert-True 'вимкнено, лічильник null = НЕ бачимо' ((Get-VisibilityStatus $false $false $null) -eq 'НЕ бачимо')
+    Assert-True 'вимкнено, але події є = Частково' ((Get-VisibilityStatus $false $false 3) -eq 'Частково')
+    Assert-True 'стан невідомий, події є = Бачимо' ((Get-VisibilityStatus $null $false 3) -eq 'Бачимо')
+    Assert-True 'стан невідомий, 0 = Невідомо'      ((Get-VisibilityStatus $null $false 0) -eq 'Невідомо')
+
     Test-Group 'FILETIME'
     Assert-True '2024'                    ((ConvertFrom-AdFileTime 133700000000000000).Year -eq 2024)
     Assert-True '0 -> null'               ($null -eq (ConvertFrom-AdFileTime 0))
@@ -200,6 +280,37 @@ try {
     }
     Assert-True 'DC: Spooler = ризик' (@($D.Hardening | Where-Object { $_.Check -like 'Print Spooler на контролері*' -and $_.Status -eq 'Ризик' }).Count -eq 1)
     Assert-True 'DC: LAPS = Н/д'      (@($D.Hardening | Where-Object { $_.Check -eq 'LAPS' -and $_.Status -eq 'Н/д' }).Count -eq 1)
+
+    Test-Group 'Крок 2.11 (видимість за категоріями) на підставних даних'
+    $step211 = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].CommandElements.Count -ge 3 -and $args[0].CommandElements[0].Extent.Text -eq 'Invoke-Step' -and $args[0].CommandElements[1].Extent.Text -like '"2.11 *' }, $true) | Select-Object -First 1
+    Assert-True 'крок 2.11 знайдено' ($null -ne $step211)
+    & {   # підставні auditpol / лічильники / канали — лише в цьому блоці
+        $audVals = @{ '9215' = 3; '922B' = 1; '9226' = 0; '9225' = 0; '9232' = 3; '9235' = 1; '922F' = 0 }
+        function Get-AuditSubcategory { param([string]$Guid) $k = $Guid.Substring(5, 4); if ($audVals.ContainsKey($k)) { [pscustomobject]@{ Value = $audVals[$k]; Text = '' } } else { [pscustomobject]@{ Value = $null; Text = '' } } }
+        function Get-EventIdCount24h { param([string]$Log, [int[]]$Ids, [datetime]$At, [int]$Limit = 100000)
+            if ($Log -like '*Sysmon*') { return $null }
+            $n = 0; if ($Log -eq 'Security' -and $Ids -contains 4624) { $n = 100 } elseif ($Log -eq 'Security' -and $Ids -contains 4719) { $n = 2 }
+            [pscustomobject]@{ Total = $n; ById = @{ $Ids[0] = $n }; Capped = $false } }
+        function Get-WinEvent { param([string]$ListLog, $ErrorAction) if ($ListLog -like '*Sysmon*') { throw 'немає' }; [pscustomobject]@{ IsEnabled = ($ListLog -notlike '*WinRM*') } }
+        $RunStart = Get-Date
+        foreach ($role in 1, 2) {
+            $D = @{ IsDC = ($role -eq 2); FwProfiles = @([pscustomobject]@{ Profile = 'Domain'; LogAllowed = 'False'; LogBlocked = 'True' }); EventVisibility = @() }
+            & ([scriptblock]::Create($step211.CommandElements[2].ScriptBlock.EndBlock.Extent.Text))
+            $v = @($D.EventVisibility)
+            Assert-True ("роль {0}: {1} категорій" -f $role, $v.Count) ($v.Count -ge $(if ($role -eq 2) { 30 } else { 26 }))
+            Assert-True "роль ${role}: статуси коректні" (@($v | Where-Object { $_.Status -notin 'Бачимо', 'Частково', 'НЕ бачимо', 'Невідомо' }).Count -eq 0)
+            Assert-True "роль ${role}: Kerberos лише на DC" ((@($v | Where-Object { $_.Category -like 'Kerberos*' }).Count -gt 0) -eq ($role -eq 2))
+        }
+        $g = { param($c) @($v | Where-Object { $_.Category -eq $c })[0] }
+        Assert-True '4624: Бачимо, 100 подій'          ((& $g 'Успішний вхід').Status -eq 'Бачимо' -and (& $g 'Успішний вхід').Events24h -eq 100)
+        Assert-True '4719: аудит вимкнено, події є'     ((& $g 'Зміна політики аудиту').Status -eq 'Частково' -and (& $g 'Зміна політики аудиту').AuditChanged)
+        Assert-True 'Sysmon відсутній = НЕ бачимо'      ((& $g 'Процеси (Sysmon)').Status -eq 'НЕ бачимо' -and (& $g 'Процеси (Sysmon)').Comment -like 'Sysmon не встановлено*')
+        Assert-True 'WinRM вимкнено = НЕ бачимо'        ((& $g 'WinRM / PowerShell Remoting').Status -eq 'НЕ бачимо')
+        Assert-True '5152: аудит вимкнено, pfirewall.log = Частково' ((& $g 'Мережа: заблоковані').Status -eq 'Частково' -and -not (& $g 'Мережа: заблоковані').AuditChanged)
+        Assert-True '5156: вимкнено = НЕ бачимо'        ((& $g 'Мережа: дозволені з''єднання').Status -eq 'НЕ бачимо')
+        Assert-True 'auditpol не прочитано, 0 = Невідомо' ((& $g 'Привілейований вхід').Status -eq 'Невідомо')
+        Assert-True '1102: Бачимо завжди'              ((& $g 'Очищення журналу').Status -eq 'Бачимо')
+    }
 }
 finally {
     $env:SystemRoot = $origSystemRoot

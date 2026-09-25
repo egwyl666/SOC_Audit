@@ -2,7 +2,7 @@
 
 [English](README.md) | Українська
 
-**SOC Live Response Collector v1.5.0** — один скрипт збору доказів і первинного аналізу Windows-хоста
+**SOC Live Response Collector v1.7.1** — один скрипт збору доказів і первинного аналізу Windows-хоста
 (замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`). Узгоджено з **NIST SP 800-86**.
 
 Скрипт збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти, перевіряє
@@ -97,6 +97,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-NamePatterns` | `*KMS*`, `*activ*`, `*SECOPatcher*` | Маски імен файлів (пошук по дисках, LNK, BAM, Prefetch, кошик, історія браузерів) |
 | `-KnownPaths` | шляхи KMSAuto | Конкретні файли/папки: hash, підпис, MAC до/після, Zone.Identifier |
 | `-IocSha256` | hash KMSAuto++ і архіву | Шукаються у файлах, процесах, службах, Sysmon |
+| `-IocSha1` | — | SHA1 файлів; шукаються в Amcache (він зберігає SHA1, а не SHA256). Потрібен `-CollectHives` |
 | `-IocIPs` | `192.168.77.51`, `fe80::1a2b:…`, `10.9.0.20` | Шукаються в з'єднаннях, ARP/NDP, pfirewall.log, RDP, 4625, реєстрі KMS. Збіг — лише за межами адреси (`10.9.0.20` не збігається з `110.9.0.201`) |
 | `-SearchRoots` | усі локальні та знімні диски | Де шукати файли |
 | `-ExcludeDirs` | WinSxS, DriverStore, servicing… | Фрагменти шляхів, які пропускаються |
@@ -128,7 +129,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-SkipWideSearch` | Без пошуку по всіх дисках | Швидкий тріаж (найдовший крок) |
 | `-SkipEvidenceCopy` | Без копій історії браузерів / Timeline / PS history / pfirewall.log | Hunting на багатьох хостах |
 | `-NoEvtx` | Без експорту оригінальних `.evtx` (крок 3.9) | Hunting / мало місця. На DC журнал Security може бути 1+ ГБ |
-| `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache через `esentutl /vss` | Глибока форензика. Увага: створює тіньову копію — змінює систему (фіксується в custody) |
+| `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache через `esentutl /vss`, розбір Amcache (крок 5.10) | Глибока форензика, пошук видалених файлів за SHA1. Увага: створює тіньову копію — змінює систему (фіксується в custody) |
 | `-UsnJournal` | Вибірка з USN-журналу за масками | Потрібно знати, коли файли створювалися/видалялися. Довго |
 | `-NoZip` | Без ZIP-архіву | Коли архів не потрібен |
 
@@ -190,10 +191,12 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | **2. Система** | Облікові записи, адміни, політики, служби, задачі (автор з XML), автозапуск, WMI, Defender, ліцензування/KMS, firewall, журнали подій (розмір/глибина/покриття) та налаштування аудиту |
 | **2.9 Налаштування безпеки** | SMBv1 і підпис SMB, LLMNR/NetBIOS, WDigest, захист LSA (RunAsPPL), Credential Guard, LM/NTLM, UAC, RDP NLA, PowerShell v2, BitLocker, правила ASR, LAPS, обліковий запис «Гість», Print Spooler на DC, профілі firewall, давність останнього оновлення |
 | **2.10 AD: конфігурація** (лише DC) | Облікові записи під Kerberoasting і AS-REP roasting, неконтрольоване делегування, вік пароля krbtgt, прапорці привілейованих облікових записів, MachineAccountQuota, парольна політика і блокування, склад привілейованих груп |
+| **2.11 Видимість подій** | Для кожної категорії подій (входи, RDP, створення процесів, PowerShell, служби, задачі, мережа, правила firewall, облікові записи і групи, політика аудиту, очищення журналу, спільні папки, Defender, WMI, WinRM; на DC — Kerberos і DS Access): чи вона пишеться (auditpol / канал / політика) і скільки подій реально є за 24 год. Статус: Бачимо / Частково / НЕ бачимо / Невідомо |
 | **3. Журнали за вікно** | 4625/4624/4648/4740/4776, зміни облікових записів, очищення журналів, RDP (1149, 21–25, 131, 140), служби (7045/4697/7040), задачі (4698–4702, TaskScheduler), зміни firewall (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC-запуски (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 |
 | **3.9 Оригінальні журнали** | Повний експорт `.evtx` (`wevtutil epl`) з SHA256 — для переаналізу Hayabusa / Chainsaw / EvtxECmd |
 | **3.10 AD: ознаки атак** (лише DC) | Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), зміни привілейованих груп, небезпечні зміни userAccountControl, 5136 (Shadow Credentials, RBCD, GPO, ACL AdminSDHolder і кореня домену). Спершу — перевірка, чи ці події взагалі аудитуються |
 | **4. pfirewall.log** | Зведення по портах і джерелах, ALLOW/DROP, first/last, евристики (ICMP-розвідка, RDP/WinRM/SSH, SMB/RPC, сканування), IOC IP |
+| **5.10 Сліди запуску** | UserAssist (що і скільки разів запускав користувач, коли востаннє), RunMRU (команди Win+R), ShimCache (файли, які система «бачила»), Amcache (шлях + SHA1, з `-CollectHives`). Звірка з масками та `-IocSha1` |
 | **5. Файлові артефакти** | Відомі шляхи, пошук за масками, LNK (з ціллю), BAM/DAM, Prefetch, кошик ($I), Zone.Identifier, копії історії браузерів / Windows Timeline (разом з `-wal`/`-journal`) / PS history з пошуком підказок |
 | **6. Аналіз** | Зведення brute-force, кореляція 4625 ↔ firewall ↔ RDP, IOC-збіги, автоматичні прапорці |
 | **7–9. Звіт** | Timeline (UTC), HTML, chain of custody, маніфест SHA256, ZIP + hash |
@@ -216,10 +219,11 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── manifest.csv.sha256          ← hash маніфесту
 ├── 00_tool\                     ← копія скрипта, яким збирали
 ├── 01_volatile\                 ← процеси, мережа, netstat_ano.txt, сесії
-├── 02_system\                   ← система; security_config_audit.csv; на DC — ad_config.csv, ad_risky_accounts.csv
+├── 02_system\                   ← система (повні переліки: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; event_visibility.csv; на DC — ad_config.csv, ad_risky_accounts.csv
 ├── 03_eventlogs\                ← вибірки журналів; на DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← оригінальні журнали .evtx + evtx_export.csv
-├── 04_firewall\  05_artifacts\
+├── 04_firewall\                 ← fw_rules_all.csv (усі правила, включно з вимкненими), журнал firewall
+├── 05_artifacts\                ← файлові артефакти; сліди запуску: userassist.csv, runmru.csv, shimcache.csv, amcache_files.csv
 └── 06_evidence_copies\          ← верифіковані копії (браузери, pfirewall.log, кущі)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
 ```
@@ -228,7 +232,9 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 ### HTML-звіт
 
-- Бокове меню — 19 розділів, зокрема «4.1 Налаштування безпеки» і «5.1 Active Directory» (на DC)
+- Перший розділ — «1.1 Стабільність надходження логів»: канал, подій за 24 год, усього записів, розмір, заповненість, глибина історії, режим; вимкнені канали підсвічено; під таблицею — ключові показники (покриття вікна, Sysmon, 4104, командний рядок у 4688)
+- У тому ж розділі — «1.2 Перевірка видимості за категоріями подій»: категорія, Event ID, джерело, статус, коментар (стан аудиту і подій за 24 год); `02_system\event_visibility.csv`
+- Бокове меню — 21 розділ (зокрема «13.1 Сліди запуску»), зокрема «4.1 Налаштування безпеки» і «5.1 Active Directory» (на DC)
 - Картки-лічильники та таблиця прапорців з рівнем (Критично / Високо / Середньо / Інфо)
 - У кожній таблиці: **фільтр** (поле пошуку) і **сортування** (клік по заголовку)
 - Підсвітка рядків: червоний — IOC / критично, помаранчевий — підозріло, зелений — VERIFIED / OK
@@ -281,6 +287,9 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 - `.evtx` експортуються повністю (`wevtutil epl`) — це експорт, а не побайтна копія файлу журналу.
 - Історія браузерів / Timeline аналізується пошуком рядків (без SQLite) — без точних часових міток; для таймінгу відкрийте копії в DB Browser for SQLite.
 - Склад привілейованих груп AD — лише прямі члени; вкладені групи перевіряйте окремо.
+- UserAssist / RunMRU — лише для користувачів, які зараз увійшли (завантажений куш NTUSER.DAT).
+- ShimCache на Windows 10+ **не доводить запуск** — лише те, що система «бачила» файл; дата — зміна файлу, не запуску. Записується при вимкненні ОС.
+- Amcache розбирається лише з `-CollectHives`; для цього робоча копія тимчасово монтується в реєстр (`reg load` / `reg unload`, фіксується в custody).
 - Ознаки атак на AD видно лише тоді, коли відповідні підкатегорії аудиту ввімкнені (скрипт це перевіряє і пише у звіт).
 - Рекомендовані розміри журналів — орієнтовні (для навантажених серверів / DC Security ≥ 4 ГБ).
 - IP-адреса у кореляції — **кандидат**, не доказ ідентичності (NIST 6.4.4).
@@ -291,7 +300,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 | Файл | Що перевіряє |
 |---|---|
-| `tests/run-tests.ps1` | Unit-тести без зовнішніх модулів: IOC IP, розбір `auditpol` (EN/RU/UA), ознаки атак на AD, пошук рядків у БД, hash відкритих файлів, збіг імен функцій з алиасами, крок 2.9 для станції та DC |
+| `tests/run-tests.ps1` | Unit-тести без зовнішніх модулів: IOC IP, розбір `auditpol` (EN/RU/UA), ознаки атак на AD, пошук рядків у БД, hash відкритих файлів, збіг імен функцій з алиасами, крок 2.9 для станції та DC, крок 2.11 на підставних даних, підрахунок подій за ID проти `Get-WinEvent` |
 | `tests/check-encoding.ps1` | Усі `*.ps1` — UTF-8 з BOM і CRLF |
 | `tests/smoke.ps1` | Повний запуск збору окремим процесом: звіт, маніфест, жодного кроку зі статусом `ПОМИЛКА` |
 

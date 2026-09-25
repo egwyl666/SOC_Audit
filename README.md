@@ -2,7 +2,7 @@
 
 English | [Українська](README.uk.md)
 
-**SOC Live Response Collector v1.5.0** — a single script for evidence collection and first-pass analysis of a Windows host
+**SOC Live Response Collector v1.7.1** — a single script for evidence collection and first-pass analysis of a Windows host
 (replaces the old main audit + `fwlog.ps1` + `filesinter.ps1`). Aligned with **NIST SP 800-86**.
 
 The script collects volatile data, persistence, event logs, `pfirewall.log` and file artifacts, checks security
@@ -99,6 +99,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-NamePatterns` | `*KMS*`, `*activ*`, `*SECOPatcher*` | File name masks (disk search, LNK, BAM, Prefetch, Recycle Bin, browser history) |
 | `-KnownPaths` | KMSAuto paths | Specific files/folders: hash, signature, MAC before/after, Zone.Identifier |
 | `-IocSha256` | KMSAuto++ and archive hashes | Matched against files, processes, services, Sysmon |
+| `-IocSha1` | — | File SHA1s; matched against Amcache (it stores SHA1, not SHA256). Requires `-CollectHives` |
 | `-IocIPs` | `192.168.77.51`, `fe80::1a2b:…`, `10.9.0.20` | Matched against connections, ARP/NDP, pfirewall.log, RDP, 4625, KMS registry. Whole-address match only (`10.9.0.20` does not match `110.9.0.201`) |
 | `-SearchRoots` | all local and removable drives | Where to search for files |
 | `-ExcludeDirs` | WinSxS, DriverStore, servicing… | Path fragments to skip |
@@ -130,7 +131,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-SkipWideSearch` | No search across all drives | Quick triage (this is the longest step) |
 | `-SkipEvidenceCopy` | No copies of browser history / Timeline / PS history / pfirewall.log | Hunting across many hosts |
 | `-NoEvtx` | No export of original `.evtx` logs (step 3.9) | Hunting / little disk space. On a DC the Security log can be 1+ GB |
-| `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache via `esentutl /vss` | Deep forensics. Note: creates a shadow copy — modifies the system (recorded in custody) |
+| `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache via `esentutl /vss`, Amcache parsing (step 5.10) | Deep forensics, finding deleted files by SHA1. Note: creates a shadow copy — modifies the system (recorded in custody) |
 | `-UsnJournal` | USN journal extract by masks | When you need to know when files were created/deleted. Slow |
 | `-NoZip` | No ZIP archive | When you don't need the archive |
 
@@ -192,10 +193,12 @@ The AD steps (2.10, 3.10) turn on automatically when the host is a domain contro
 | **2. System** | Accounts, admins, policies, services, scheduled tasks (author from XML), autoruns, WMI, Defender, licensing/KMS, firewall, event logs (size/depth/coverage) and audit policy |
 | **2.9 Security settings** | SMBv1 and SMB signing, LLMNR/NetBIOS, WDigest, LSA protection (RunAsPPL), Credential Guard, LM/NTLM, UAC, RDP NLA, PowerShell v2, BitLocker, ASR rules, LAPS, Guest account, Print Spooler on a DC, firewall profiles, age of the last update |
 | **2.10 AD configuration** (DC only) | Kerberoastable and AS-REP-roastable accounts, unconstrained delegation, krbtgt password age, privileged account flags, MachineAccountQuota, password and lockout policy, privileged group members |
+| **2.11 Event visibility** | For each event category (logons, RDP, process creation, PowerShell, services, tasks, network, firewall rules, accounts and groups, audit policy, log clearing, file shares, Defender, WMI, WinRM; Kerberos and DS Access on a DC): whether it is written (auditpol / channel / policy) and how many events there actually are in the last 24 h. Status: Бачимо / Частково / НЕ бачимо / Невідомо |
 | **3. Logs for the window** | 4625/4624/4648/4740/4776, account changes, log clearing, RDP (1149, 21–25, 131, 140), services (7045/4697/7040), tasks (4698–4702, TaskScheduler), firewall changes (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC executions (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 |
 | **3.9 Original logs** | Full `.evtx` export (`wevtutil epl`) with SHA256 — for re-analysis with Hayabusa / Chainsaw / EvtxECmd |
 | **3.10 AD attack signs** (DC only) | Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), privileged group changes, dangerous userAccountControl changes, 5136 (Shadow Credentials, RBCD, GPO, AdminSDHolder and domain-root ACL). First checks whether these events are audited at all |
 | **4. pfirewall.log** | Summary by port and source, ALLOW/DROP, first/last, heuristics (ICMP recon, RDP/WinRM/SSH, SMB/RPC, scanning), IOC IPs |
+| **5.10 Execution traces** | UserAssist (what the user ran, how many times, last run), RunMRU (Win+R commands), ShimCache (files the system has "seen"), Amcache (path + SHA1, with `-CollectHives`). Matched against masks and `-IocSha1` |
 | **5. File artifacts** | Known paths, mask search, LNK (with target), BAM/DAM, Prefetch, Recycle Bin ($I), Zone.Identifier, copies of browser history / Windows Timeline (with `-wal`/`-journal`) / PS history with hint search |
 | **6. Analysis** | Brute-force summary, 4625 ↔ firewall ↔ RDP correlation, IOC matches, automatic flags |
 | **7–9. Report** | Timeline (UTC), HTML, chain of custody, SHA256 manifest, ZIP + hash |
@@ -218,10 +221,11 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── manifest.csv.sha256          ← manifest hash
 ├── 00_tool\                     ← copy of the script used for collection
 ├── 01_volatile\                 ← processes, network, netstat_ano.txt, sessions
-├── 02_system\                   ← system; security_config_audit.csv; on a DC — ad_config.csv, ad_risky_accounts.csv
+├── 02_system\                   ← system (full lists: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; event_visibility.csv; on a DC — ad_config.csv, ad_risky_accounts.csv
 ├── 03_eventlogs\                ← log extracts; on a DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← original .evtx logs + evtx_export.csv
-├── 04_firewall\  05_artifacts\
+├── 04_firewall\                 ← fw_rules_all.csv (all rules, including disabled), firewall log
+├── 05_artifacts\                ← file artifacts; execution traces: userassist.csv, runmru.csv, shimcache.csv, amcache_files.csv
 └── 06_evidence_copies\          ← verified copies (browsers, pfirewall.log, hives)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
 ```
@@ -230,7 +234,9 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 ### HTML report
 
-- Sidebar navigation — 19 sections, incl. "4.1 Security settings" and "5.1 Active Directory" (on a DC)
+- First section — "1.1 Log ingestion stability": channel, events in the last 24 h, total records, size, fill, history depth, mode; disabled channels highlighted; below it the key indicators (window coverage, Sysmon, 4104, command line in 4688)
+- In the same section — "1.2 Event visibility by category": category, Event ID, source, status, comment (audit state and events in 24 h); `02_system\event_visibility.csv`
+- Sidebar navigation — 21 sections (incl. "13.1 Execution traces"), incl. "4.1 Security settings" and "5.1 Active Directory" (on a DC)
 - Counter cards and a flag table with severity (Critical / High / Medium / Info)
 - Every table has a **filter** (search box) and **sorting** (click a header)
 - Row highlighting: red — IOC / critical, orange — suspicious, green — VERIFIED / OK
@@ -283,6 +289,9 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 - `.evtx` logs are exported in full (`wevtutil epl`) — an export, not a byte copy of the log file.
 - Browser history / Timeline are analyzed by string search (no SQLite) — no exact timestamps; for timing, open the copies in DB Browser for SQLite.
 - Privileged AD group membership — direct members only; check nested groups separately.
+- UserAssist / RunMRU — only for users currently logged on (loaded NTUSER.DAT hive).
+- ShimCache on Windows 10+ **does not prove execution** — only that the system "saw" the file; the date is the file's modification time, not a run time. It is written at OS shutdown.
+- Amcache is parsed only with `-CollectHives`; a working copy is temporarily mounted in the registry (`reg load` / `reg unload`, recorded in custody).
 - AD attack signs are visible only when the corresponding audit subcategories are enabled (the script checks this and reports it).
 - Recommended log sizes are approximate (for busy servers / DCs, Security ≥ 4 GB).
 - An IP address in correlation is a **candidate**, not proof of identity (NIST 6.4.4).
@@ -293,7 +302,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 | File | What it checks |
 |---|---|
-| `tests/run-tests.ps1` | Unit tests without external modules: IOC IPs, `auditpol` parsing (EN/RU/UA), AD attack signs, string search in databases, hashing of open files, function names vs built-in aliases, step 2.9 for a workstation and a DC |
+| `tests/run-tests.ps1` | Unit tests without external modules: IOC IPs, `auditpol` parsing (EN/RU/UA), AD attack signs, string search in databases, hashing of open files, function names vs built-in aliases, step 2.9 for a workstation and a DC, step 2.11 on stub data, per-ID event counts compared with `Get-WinEvent` |
 | `tests/check-encoding.ps1` | Every `*.ps1` is UTF-8 with BOM and CRLF |
 | `tests/smoke.ps1` | Full collection run in a separate process: report, manifest, no step with status `ПОМИЛКА` |
 

@@ -1,5 +1,90 @@
 # Changelog
 
+## [1.7.1] — 2026-09-25
+
+Event visibility by category — the analyst's manual "what can we see" table, built automatically.
+Status: parser check and unit tests pass; Windows validation in CI; runs on DC01 / Pro to follow.
+
+### Added
+- Step **2.11 "Видимість за категоріями подій"** (`02_system\event_visibility.csv`). For each category — logons
+  (4624/4625/4648/4672/4634/4647/4776), RDP (21/24/25/1149), process creation (4688, Sysmon 1), Sysmon 3, PowerShell
+  (4104, 4103, transcription), services (4697/7045), tasks (4698-4702, TaskScheduler 106/140/141), network (5156,
+  5152/5157), firewall rule changes (4946-4948, 2004-2006/2097), user and group management, audit policy change (4719),
+  log clearing (1102/104), file shares (5140/5145), file access (4663), Defender (1116/1117), WMI-Activity, WinRM, and on
+  a DC Kerberos (4768/4771, 4769), DS Access (4662) and DS Changes (5136):
+  - the state of the source: auditpol subcategory by GUID (no locale dependence), channel, or registry policy;
+  - the actual number of events in the last 24 h by Event ID (EventLogReader, per-ID breakdown, limit 100 000);
+  - status Бачимо / Частково / НЕ бачимо / Невідомо and a generated comment; alternative sources are taken into
+    account (7045 in System, TaskScheduler channel, pfirewall.log, Firewall channel) as "Частково".
+- Report: subsection **1.2 "Перевірка видимості за категоріями подій"** under the log stability table, with a
+  summary line and colour by status.
+- One new flag (Середньо): an audit subcategory is off now, but its events exist in the last 24 h — the audit policy
+  may have been changed recently. Disabled audit itself is already flagged by step 2.8, so it is not duplicated.
+- Tests: status logic, XPath, step 2.11 on stub data (workstation and DC), per-ID counts compared with `Get-WinEvent`
+  on Windows; smoke run checks `event_visibility.csv`.
+
+## [1.7.0] — 2026-09-25
+
+Complete source data and a clearer report. Flags and highlighting still work on the same subsets, so there is no extra noise.
+Status: parser check and unit tests pass; Windows validation in CI; runs on DC01 / Pro to follow.
+
+### Changed — source CSVs are no longer pre-filtered
+- **Firewall rules:** all rules, including disabled ones (`04_firewall\fw_rules_all.csv`, column `Enabled`);
+  `fw_rules_enabled.csv` is kept.
+- **Scheduled tasks:** every task, including the built-in `\Microsoft\` ones (`02_system\scheduled_tasks_all.csv`,
+  column `Suspicious`); `scheduled_tasks_nonms_or_suspicious.csv` is kept.
+- **Prefetch:** every `.pf` file (`05_artifacts\prefetch_all.csv`, column `Match`), not only mask matches.
+- **ARP/NDP:** all neighbour states (Unreachable / Permanent were dropped before).
+- **Defender:** all properties of `Get-MpComputerStatus` and `Get-MpPreference` (`02_system\defender_full.csv`).
+- **Event logs:** inventory of every channel on the host (`02_system\eventlog_inventory.csv`); the health check also
+  covers WMI-Activity, WinRM, BITS, SMBServer/Security, NTLM/Operational, RDPClient, Directory Service and DNS Server
+  (for reference only, no flags); new column `Events24h`.
+
+### Added
+- Report section **1.1 "Стабільність надходження логів"**, opened by default:
+  - table: channel, events in the last 24 h (exact count by event time via EventLogReader; for channels with more
+    than 100 000 events a day — an estimate from the RecordId difference, marked "≈"), total records,
+    max size, fill %, history days, mode, state;
+  - disabled channels and channels that do not cover the window are highlighted;
+  - numbers use thousands separators;
+  - below it a "Показник / Значення" table: snapshot time, Security history depth and window coverage, Sysmon, 4104,
+    command line in 4688, disabled / absent channels, channel totals.
+- Full tables in the report: all firewall rules (disabled ones greyed), all scheduled tasks, all log channels, all
+  Prefetch files, full Defender state.
+- Table sorting treats "33 744" and "15,1" as numbers.
+
+### Fixed (found by CI on v1.6.0)
+- Amcache working copy stayed mounted: keys opened through the PowerShell registry provider kept handles, so
+  `reg unload` failed. Amcache is now read with .NET `RegistryKey` and every key is closed explicitly.
+- Smoke test counted 0 rows for every CSV in Windows PowerShell 5.1 (`PSObject.Properties` has no `.Count` there).
+- Duplicate lines in collection notes.
+- Events per 24 h: the first version used only the RecordId difference; CI showed it can overcount (354 vs 329 on a
+  freshly booted VM whose clock was corrected, record order ≠ time order). Now counted exactly.
+
+## [1.6.0] — 2026-09-25
+
+Execution traces — "was the file run, by whom and when" where Prefetch is off (servers) and 4688/Sysmon are not set up.
+One new, independent step; existing steps unchanged. Status: parser check, 157 unit tests (incl. synthetic
+UserAssist/ShimCache blobs); Windows validation in CI (smoke run now uses `-CollectHives`).
+
+### Added
+- **Step 5.10 — execution traces**, report section **13.1**, CSVs in `05_artifacts\`:
+  - **UserAssist** for loaded user hives: decoded (ROT13) program path with KNOWNFOLDER GUIDs resolved, run count,
+    focus count/time, last run time (Win7+ 72-byte and XP 16-byte formats).
+  - **RunMRU** (Win+R history) in MRU order, each command checked with the existing LOLBin / suspicious-argument /
+    IOC logic.
+  - **ShimCache / AppCompatCache** (Windows 10/11, Server 2016+): path, file modification time, order. Clearly
+    labelled as "seen by the system", not proof of execution.
+  - **Amcache** (with `-CollectHives`): `reg load` of a *working copy* of the verified copy → InventoryApplicationFile
+    (path, SHA1, publisher, version, link date) → `reg unload`, recorded in custody; the working copy is deleted.
+- Parameter **`-IocSha1`** — matched against Amcache SHA1; hits go to IOC matches and are Critical flags.
+- Flags (area "Виконання") for mask/IOC matches; RunMRU flagged only for suspicious arguments or IOC matches.
+  Timeline entries for UserAssist last runs and ShimCache file dates of matches.
+
+### Changed
+- CI runs on push only for `main` (pull requests are still checked), no more duplicate runs.
+- Smoke test runs with `-CollectHives`, prints execution-trace row counts and fails if an Amcache hive is left mounted.
+
 ## [1.5.0] — 2026-09-25
 
 First step of the road to 2.0: automated checks on real Windows. The collector's behaviour is unchanged.
