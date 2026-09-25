@@ -154,7 +154,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.7.1'
+$ToolVersion = '1.7.2'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -2538,14 +2538,21 @@ Invoke-Step "5.6 Zone.Identifier (Mark of the Web) у Downloads/Desktop і ко�
         foreach ($sub in 'Downloads', 'Desktop') { foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $p.Path $sub) -Recurse -File -Force -ErrorAction SilentlyContinue)) { $cand.Add($f) } }
     }
     foreach ($r in $SearchRootsFinal) { foreach ($f in @(Get-ChildItem -LiteralPath $r -File -Force -ErrorAction SilentlyContinue)) { $cand.Add($f) } }
+    $skipped = New-Object System.Collections.Generic.List[string]
     foreach ($f in $cand) {
-        $zs = Get-Item -LiteralPath $f.FullName -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue
-        if (-not $zs) { continue }
-        $z = @(Get-Content -LiteralPath $f.FullName -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue)
+        # Get-Item -Stream кидає термінальну помилку на деяких файлах (не NTFS, незвичний шлях) — пропускаємо лише такий файл
+        $z = @()
+        try {
+            $zs = Get-Item -LiteralPath $f.FullName -Stream 'Zone.Identifier' -ErrorAction Stop
+            if (-not $zs) { continue }
+            $z = @(Get-Content -LiteralPath $f.FullName -Stream 'Zone.Identifier' -ErrorAction Stop)
+        } catch [System.Management.Automation.ItemNotFoundException] { continue }
+        catch { if ($_.FullyQualifiedErrorId -notlike '*AlternateDataStreamNotFound*') { $skipped.Add($f.FullName) }; continue }
         $zid = ''; $hu = ''; $ru = ''
         foreach ($l in $z) { if ($l -match '^ZoneId=(\d+)') { $zid = $Matches[1] } elseif ($l -match '^HostUrl=(.+)$') { $hu = $Matches[1] } elseif ($l -match '^ReferrerUrl=(.+)$') { $ru = $Matches[1] } }
         $rows.Add([pscustomobject]@{ File = $f.FullName; CreatedUtc = (U $f.CreationTimeUtc); ModifiedUtc = (U $f.LastWriteTimeUtc); ZoneId = $zid; HostUrl = $hu; ReferrerUrl = $ru; Match = (Test-KwMatch "$($f.Name) $hu $ru") })
     }
+    if ($skipped.Count) { Add-Note ("Zone.Identifier: {0} файл(ів) не вдалося перевірити (не NTFS або незвичний шлях), напр. {1}" -f $skipped.Count, (@($skipped | Select-Object -First 3) -join '; ')) }
     $D.Zone = Arr ($rows | Sort-Object @{ Expression = { -not $_.Match } }, CreatedUtc)
     Save-Csv $D.Zone '05_artifacts\zone_identifier.csv'
 }
