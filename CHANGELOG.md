@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.3] — 2026-09-25
+
+New, independent steps only — existing steps are unchanged (except the order inside the 1.1 snapshot).
+Status: parser check and unit tests passed; **Windows run pending**.
+
+### Added
+- **Step 2.9 — security configuration audit** (`02_system\security_config_audit.csv`, report section 4.1): SMBv1 and
+  SMB signing, LLMNR, NetBIOS over TCP/IP, WDigest `UseLogonCredential`, LSA protection (RunAsPPL), Credential Guard,
+  LM hash storage, LmCompatibilityLevel, anonymous SAM enumeration, UAC (`EnableLUA`, admin prompt,
+  `LocalAccountTokenFilterPolicy`), RDP NLA, PowerShell v2, BitLocker on the system drive, Defender ASR rules, LAPS,
+  Guest account, Print Spooler on a DC, firewall profiles, age of the last installed update.
+  Each row: current / recommended / status / fix / why. Risks rated High or Medium become flags (area "Конфігурація").
+  DC-aware: Credential Guard and LAPS are N/A on a domain controller; Spooler is checked as a DC risk.
+- **Step 3.9 — full export of original event logs** (`wevtutil epl`) to `03_eventlogs\evtx\` with SHA256 in
+  `integrity_copies.csv`, custody and `evtx_export.csv`: every log from the event-log health check plus WMI-Activity,
+  BITS, WinRM, RDPClient, SMBServer/Security, NTLM/Operational, Directory Service and DNS Server when present.
+  Switch `-NoEvtx` skips it.
+
+### Changed
+- Step 1.1 snapshot order: netstat → TCP → processes → UDP (on a DC/DNS server UDP enumeration takes ~8 s;
+  UDP is already captured by netstat).
+
 ## [1.2] — 2026-09-25
 
 Driven by the v1.1 test run on a domain controller (64- and 32-bit). Status: parser check and unit tests passed;

@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.2 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.3 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -86,6 +86,7 @@ param(
     [switch]$SkipEvidenceCopy,     # не копіювати браузерні БД / логи
     [switch]$CollectHives,         # reg save SYSTEM/SOFTWARE + Amcache через esentutl /vss (створює тимчасову тіньову копію!)
     [switch]$UsnJournal,           # вибірка з USN-журналу за масками (довго)
+    [switch]$NoEvtx,               # не експортувати оригінальні .evtx (лише CSV-вибірки)
     [switch]$NoZip
 )
 
@@ -152,7 +153,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.2'
+$ToolVersion = '1.3'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -217,7 +218,7 @@ $DataKeys = 'TcpRaw','UdpRaw','ProcRaw','Procs','Tcp','Udp','Arp','Dns','IpAddr'
             'LocalUsers','LocalAdmins','Services','Tasks','Autoruns','WmiPersist','MpExclusions','MpStatusRows','Licensing','KmsReg',
             'FwProfiles','FwRules','Ev4625','Ev4624','OtherAuth','LogCleared','Rdp','RdpSummary','SvcEvents','TaskEvents',
             'FwEvents','MpEvents','Exec','SysmonMisc','Ps4104','FwByPort','FwBySource','FwIocRaw','FwSvcHits','KnownFiles',
-            'WideHigh','WideLow','WideDirs','LogHealth','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
+            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
 foreach ($k in $DataKeys) { $D[$k] = @() }
 
 $Lolbins = @('netsh.exe','wmic.exe','reg.exe','sc.exe','schtasks.exe','cscript.exe','wscript.exe','mshta.exe','rundll32.exe',
@@ -831,7 +832,7 @@ Invoke-Step "0. Pre-flight: версія інструмента, час, про�
 }
 
 # ════════════════════════════════════ 1. ВОЛАТИЛЬНІ ДАНІ (NIST 5.1.2 — першими) ════════════════════════════════════
-Invoke-Step "1.1 Швидкий знімок: netstat, мережеві з'єднання, процеси (без hash — щоб не втратити летючі дані)" {
+Invoke-Step "1.1 Швидкий знімок: netstat, TCP, процеси, UDP (без hash — щоб не втратити летючі дані)" {
     # NIST 5.1.2: спочатку найлетючіше. Збагачення (власник, hash, підпис) — окремими кроками нижче, по знімку.
     $t0 = (Get-Date).ToUniversalTime()
     $errs = @(); $tm = @()   # збій одного джерела не повинен зірвати знімок інших; час кожного — у custody
@@ -841,10 +842,11 @@ Invoke-Step "1.1 Швидкий знімок: netstat, мережеві з'єд�
     $tm += ('netstat {0:N1}s' -f $sw.Elapsed.TotalSeconds); $sw.Restart()
     try { $D.TcpRaw  = Arr (Get-NetTCPConnection -ErrorAction Stop) } catch { $errs += "TCP: $($_.Exception.Message)" }
     $tm += ('TCP {0:N1}s' -f $sw.Elapsed.TotalSeconds); $sw.Restart()
-    try { $D.UdpRaw  = Arr (Get-NetUDPEndpoint -ErrorAction Stop) } catch { $errs += "UDP: $($_.Exception.Message)" }
-    $tm += ('UDP {0:N1}s' -f $sw.Elapsed.TotalSeconds); $sw.Restart()
     try { $D.ProcRaw = Arr (Get-CimInstance Win32_Process -ErrorAction Stop) } catch { $errs += "Процеси: $($_.Exception.Message)" }
-    $tm += ('процеси {0:N1}s' -f $sw.Elapsed.TotalSeconds)
+    $tm += ('процеси {0:N1}s' -f $sw.Elapsed.TotalSeconds); $sw.Restart()
+    # UDP останнім: на DC/DNS-сервері тисячі сокетів (~8 с), а UDP вже зафіксовано в netstat вище
+    try { $D.UdpRaw  = Arr (Get-NetUDPEndpoint -ErrorAction Stop) } catch { $errs += "UDP: $($_.Exception.Message)" }
+    $tm += ('UDP {0:N1}s' -f $sw.Elapsed.TotalSeconds)
     $D.SnapshotUtc = $t0.ToString('yyyy-MM-dd HH:mm:ss.fff') + 'Z'
     Save-Text ("# netstat -ano, знято {0}`r`n{1}" -f $D.SnapshotUtc, $ns) '01_volatile\netstat_ano.txt'
     Add-Custody 'VOLATILE_SNAPSHOT' 'netstat/TCP/UDP/процеси' $(if ($errs) { 'PARTIAL' } else { 'OK' }) ("TCP {0}, UDP {1}, процесів {2}; {3}" -f @($D.TcpRaw).Count, @($D.UdpRaw).Count, @($D.ProcRaw).Count, ($tm -join ', '))
@@ -1246,6 +1248,142 @@ Invoke-Step "2.8 Журнали подій: розмір, заповненіст
     Save-Csv $D.AuditSettings '02_system\audit_settings_check.csv'
 }
 
+# ════════════════════════════════════ 2.9 АУДИТ КОНФІГУРАЦІЇ БЕЗПЕКИ ════════════════════════════════════
+# Лише читання реєстру/CIM. Не «що сталося», а «наскільки хост вразливий»: кожен рядок — поточне значення,
+# рекомендоване, команда виправлення і чому це важливо. Ризики рівня Високо/Середньо потрапляють у прапорці (6.4).
+Invoke-Step "2.9 Налаштування безпеки: SMB, LLMNR/NetBIOS, WDigest, LSA, UAC, RDP, NTLM, PowerShell v2, BitLocker, ASR, LAPS, оновлення" {
+    $rows = New-Object System.Collections.Generic.List[object]
+    function Get-RegValue { param([string]$Key, [string]$Name) try { return (Get-ItemProperty -LiteralPath $Key -Name $Name -ErrorAction Stop).$Name } catch { return $null } }
+    function Add-Chk {   # State: ok / risk / na / unknown
+        param([string]$Area, [string]$Check, $Current, [string]$Recommended, [string]$State, [string]$Sev = '', [string]$Fix = '', [string]$Why = '')
+        $st = switch ($State) { 'ok' { 'OK' } 'risk' { 'Ризик' } 'na' { 'Н/д' } default { 'Невідомо' } }
+        if ($State -ne 'risk') { $Sev = '' }
+        if ($State -eq 'ok') { $Fix = '' }
+        $rows.Add([pscustomobject]@{ Area = $Area; Check = $Check; Current = [string]$Current; Recommended = $Recommended; Status = $st; Severity = $Sev; Fix = $Fix; Why = $Why })
+    }
+    $isWs = ($D.ProductType -eq 1)
+    $lsa = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+    $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+
+    # ── SMB ──
+    $smb = $null; try { $smb = Get-SmbServerConfiguration -ErrorAction Stop } catch {}
+    if ($smb) {
+        $on = [bool]$smb.EnableSMB1Protocol
+        Add-Chk 'Мережа' 'SMBv1 (сервер)' $(if ($on) { 'Увімкнено' } else { 'Вимкнено' }) 'Вимкнено' $(if ($on) { 'risk' } else { 'ok' }) 'Високо' 'Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force' 'EternalBlue/WannaCry; застарілий протокол без захисту від relay'
+        $sg = [bool]$smb.RequireSecuritySignature
+        Add-Chk 'Мережа' 'SMB signing обовʼязковий (сервер)' $(if ($sg) { 'Так' } else { 'Ні' }) 'Так' $(if ($sg) { 'ok' } else { 'risk' }) $(if ($D.IsDC) { 'Високо' } else { 'Середньо' }) 'Set-SmbServerConfiguration -RequireSecuritySignature $true -Force' 'NTLM relay на SMB (ntlmrelayx)'
+    } else { Add-Chk 'Мережа' 'SMB (сервер)' 'Get-SmbServerConfiguration недоступний' 'SMBv1 вимкнено, signing обовʼязковий' 'unknown' }
+
+    # ── Отруєння імен (Responder) ──
+    $mc = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMulticast'
+    Add-Chk 'Мережа' 'LLMNR' $(if ($mc -eq 0) { 'Вимкнено політикою' } else { 'Увімкнено (політику не задано)' }) 'Вимкнено' $(if ($mc -eq 0) { 'ok' } else { 'risk' }) 'Середньо' 'GPO: Network → DNS Client → Turn off multicast name resolution = Enabled' 'Отруєння LLMNR (Responder) → перехоплення NTLM-хешів'
+    $nb = @()
+    try { $nb = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop) } catch {}
+    if ($nb.Count) {
+        $bad = @($nb | Where-Object { [int]$_.TcpipNetbiosOptions -ne 2 })
+        $cur = (@($nb | ForEach-Object { "{0}: {1}" -f $_.Description, $(switch ([int]$_.TcpipNetbiosOptions) { 0 { 'за DHCP (зазвичай увімкнено)' } 1 { 'увімкнено' } 2 { 'вимкнено' } default { '?' } }) }) -join '; ')
+        Add-Chk 'Мережа' 'NetBIOS over TCP/IP' $cur 'Вимкнено на всіх адаптерах' $(if ($bad.Count) { 'risk' } else { 'ok' }) 'Середньо' 'Адаптер → IPv4 → Додатково → WINS → Вимкнути NetBIOS (або DHCP option 001 = 2)' 'Отруєння NBT-NS (Responder)'
+    }
+
+    # ── Облікові дані в памʼяті / LSA ──
+    $wd = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' 'UseLogonCredential'
+    Add-Chk 'Облікові дані' 'WDigest UseLogonCredential' $(if ($null -eq $wd) { 'не задано (0 за замовчуванням)' } else { $wd }) '0' $(if ($wd -eq 1) { 'risk' } else { 'ok' }) 'Високо' 'reg add HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest /v UseLogonCredential /t REG_DWORD /d 0 /f' 'Паролі у відкритому вигляді в LSASS (Mimikatz). Значення 1 зловмисники ставлять навмисно — перевірте, хто змінив'
+    $ppl = Get-RegValue $lsa 'RunAsPPL'
+    Add-Chk 'Облікові дані' 'LSA Protection (RunAsPPL)' $(if ($null -eq $ppl) { 'не задано' } else { $ppl }) '1 або 2' $(if ($ppl -in 1, 2) { 'ok' } else { 'risk' }) 'Середньо' 'reg add HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v RunAsPPL /t REG_DWORD /d 1 /f (+ перезавантаження; перевірте сумісність драйверів/AV)' 'Захист LSASS від дампу памʼяті'
+    if ($D.IsDC) { Add-Chk 'Облікові дані' 'Credential Guard' 'контролер домену' 'н/д' 'na' '' '' 'На DC Credential Guard не захищає базу AD і не рекомендований' }
+    else {
+        $cg = $null; try { $cg = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' -ClassName Win32_DeviceGuard -ErrorAction Stop } catch {}
+        if ($cg) { $run = (@($cg.SecurityServicesRunning) -contains 1); Add-Chk 'Облікові дані' 'Credential Guard' $(if ($run) { 'Працює' } else { 'Не працює' }) 'Працює' $(if ($run) { 'ok' } else { 'risk' }) 'Інфо' 'GPO: System → Device Guard → Turn On Virtualization Based Security (Credential Guard)' 'Ізоляція NTLM-хешів і Kerberos-квитків від LSASS' }
+        else { Add-Chk 'Облікові дані' 'Credential Guard' 'Win32_DeviceGuard недоступний' 'Працює' 'unknown' }
+    }
+    $nolm = Get-RegValue $lsa 'NoLMHash'
+    Add-Chk 'NTLM' 'Зберігання LM-хешів (NoLMHash)' $(if ($null -eq $nolm) { 'не задано (1 за замовчуванням)' } else { $nolm }) '1' $(if ($nolm -eq 0) { 'risk' } else { 'ok' }) 'Високо' 'reg add HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v NoLMHash /t REG_DWORD /d 1 /f' 'LM-хеш зламується за хвилини'
+    $lmc = Get-RegValue $lsa 'LmCompatibilityLevel'
+    $lmv = 3; if ($null -ne $lmc) { $lmv = [int]$lmc }
+    Add-Chk 'NTLM' 'LmCompatibilityLevel' $(if ($null -eq $lmc) { 'не задано (3 за замовчуванням)' } else { $lmc }) '5 (лише NTLMv2), мінімум 3' $(if ($lmv -lt 3) { 'risk' } else { 'ok' }) 'Високо' 'GPO: Network security: LAN Manager authentication level = Send NTLMv2 response only. Refuse LM & NTLM' 'LM/NTLMv1 дозволяють відновити хеш з перехопленого трафіку'
+    $ras = Get-RegValue $lsa 'RestrictAnonymousSAM'
+    Add-Chk 'NTLM' 'Анонімний перелік SAM (RestrictAnonymousSAM)' $(if ($null -eq $ras) { 'не задано (1 за замовчуванням)' } else { $ras }) '1' $(if ($ras -eq 0) { 'risk' } else { 'ok' }) 'Середньо' 'reg add HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v RestrictAnonymousSAM /t REG_DWORD /d 1 /f' 'Анонімна розвідка облікових записів'
+
+    # ── UAC / віддалене адміністрування ──
+    $lua = Get-RegValue $sysPol 'EnableLUA'
+    Add-Chk 'UAC' 'UAC (EnableLUA)' $(if ($null -eq $lua) { 'не задано (1)' } else { $lua }) '1' $(if ($lua -eq 0) { 'risk' } else { 'ok' }) 'Високо' 'reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 1 /f' 'Без UAC будь-який процес адміністратора працює з повними правами'
+    $cpa = Get-RegValue $sysPol 'ConsentPromptBehaviorAdmin'
+    Add-Chk 'UAC' 'Запит підвищення для адмінів (ConsentPromptBehaviorAdmin)' $(if ($null -eq $cpa) { 'не задано (5)' } else { $cpa }) '2 або 5' $(if ($cpa -eq 0) { 'risk' } else { 'ok' }) 'Середньо' 'GPO: User Account Control: Behavior of the elevation prompt for administrators ≠ Elevate without prompting' '0 = тихе підвищення прав'
+    $latfp = Get-RegValue $sysPol 'LocalAccountTokenFilterPolicy'
+    Add-Chk 'UAC' 'LocalAccountTokenFilterPolicy' $(if ($null -eq $latfp) { 'не задано (0)' } else { $latfp }) '0' $(if ($latfp -eq 1) { 'risk' } else { 'ok' }) 'Середньо' 'reg delete HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v LocalAccountTokenFilterPolicy /f' '1 = повні права локальних адмінів по мережі (pass-the-hash, lateral movement)'
+
+    # ── RDP ──
+    $deny = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' 'fDenyTSConnections'
+    if ($deny -eq 1) { Add-Chk 'RDP' 'RDP NLA' 'RDP вимкнено' 'NLA увімкнено' 'na' }
+    else {
+        $nla = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' 'UserAuthentication'
+        $src = 'політика'
+        if ($null -eq $nla) { $nla = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' 'UserAuthentication'; $src = 'RDP-Tcp' }
+        Add-Chk 'RDP' 'RDP NLA (UserAuthentication)' ("RDP увімкнено; NLA={0} ({1})" -f $nla, $src) '1' $(if ($nla -eq 1) { 'ok' } else { 'risk' }) 'Високо' 'GPO: Remote Desktop Session Host → Security → Require user authentication … by using NLA = Enabled' 'Без NLA логін-екран доступний до автентифікації (brute-force, BlueKeep-клас вразливостей)'
+    }
+
+    # ── PowerShell v2 (обхід AMSI і Script Block Logging) ──
+    $eng = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\PowerShell\1\PowerShellEngine' 'PowerShellVersion'
+    $gac = Test-Path -LiteralPath (Join-Path $env:SystemRoot 'assembly\GAC_MSIL\System.Management.Automation\1.0.0.0__31bf3856ad364e35\System.Management.Automation.dll')
+    $n35 = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v3.5' 'Install'
+    $v2 = (([string]$eng -like '2*') -or $gac)
+    $v2run = ($v2 -and $n35 -eq 1)
+    Add-Chk 'PowerShell' 'PowerShell v2 (ознаки)' ("рушій v2: {0}; збірка v1.0 у GAC: {1}; .NET 3.5: {2}" -f $(if ($v2) { 'так' } else { 'ні' }), $(if ($gac) { 'так' } else { 'ні' }), $(if ($n35 -eq 1) { 'так' } else { 'ні' })) 'Видалено' $(if ($v2run) { 'risk' } elseif ($v2) { 'risk' } else { 'ok' }) $(if ($v2run) { 'Середньо' } else { 'Інфо' }) $(if ($isWs) { 'Disable-WindowsOptionalFeature -Online -FeatureName MicrosoftWindowsPowerShellV2Root' } else { 'Uninstall-WindowsFeature PowerShell-V2' }) 'powershell -version 2 обходить AMSI і Script Block Logging (4104). Без .NET 3.5 не запускається'
+
+    # ── Шифрування диска ──
+    $bl = $null; $blErr = ''
+    try { $bl = Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume -Filter ("DriveLetter='{0}'" -f $env:SystemDrive) -ErrorAction Stop } catch { $blErr = $_.Exception.Message }
+    if ($bl) { $prot = ([int]$bl.ProtectionStatus -eq 1); Add-Chk 'Дані' ("BitLocker ({0})" -f $env:SystemDrive) $(if ($prot) { 'Захист увімкнено' } else { 'Захист вимкнено' }) 'Увімкнено' $(if ($prot) { 'ok' } else { 'risk' }) $(if ($isWs) { 'Середньо' } else { 'Інфо' }) 'manage-bde -on C: (або через Intune/GPO)' 'Викрадення диска / офлайн-доступ до даних' }
+    else { Add-Chk 'Дані' ("BitLocker ({0})" -f $env:SystemDrive) 'компонент BitLocker не встановлено / недоступний' 'Увімкнено' $(if ($isWs) { 'unknown' } else { 'na' }) }
+
+    # ── Defender ASR ──
+    $mp = $null; try { $mp = Get-MpPreference -ErrorAction Stop } catch {}
+    if ($mp) {
+        $act = @($mp.AttackSurfaceReductionRules_Actions)
+        $blk = @($act | Where-Object { [int]$_ -in 1, 6 }).Count; $aud = @($act | Where-Object { [int]$_ -eq 2 }).Count
+        Add-Chk 'Defender' 'Правила ASR' ("блок/попередження: {0}; аудит: {1}" -f $blk, $aud) 'Ключові правила в режимі Block' $(if ($blk -gt 0) { 'ok' } else { 'risk' }) $(if ($isWs) { 'Середньо' } else { 'Інфо' }) 'Add-MpPreference -AttackSurfaceReductionRules_Ids <GUID> -AttackSurfaceReductionRules_Actions Enabled (напр. 9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2 — крадіжка з LSASS)' 'ASR блокує типові ланцюжки: макроси Office, дамп LSASS, запуск з пошти/USB'
+    } else { Add-Chk 'Defender' 'Правила ASR' 'Get-MpPreference недоступний (інший AV?)' 'Ключові правила в режимі Block' 'unknown' }
+
+    # ── LAPS ──
+    $cs = $null; try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop } catch {}
+    if ($D.IsDC) { Add-Chk 'Облікові дані' 'LAPS' 'контролер домену' 'н/д (на DC — DSRM-пароль)' 'na' }
+    elseif ($cs -and -not $cs.PartOfDomain) { Add-Chk 'Облікові дані' 'LAPS' 'хост не в домені' 'н/д' 'na' }
+    else {
+        $legacy = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd' 'AdmPwdEnabled'
+        $wl = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\LAPS' 'BackupDirectory'
+        if ($null -eq $wl) { $wl = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Policies\LAPS' 'BackupDirectory' }
+        $ok = ($legacy -eq 1 -or $wl -in 1, 2)
+        Add-Chk 'Облікові дані' 'LAPS (пароль локального адміна)' ("legacy LAPS: {0}; Windows LAPS BackupDirectory: {1}" -f $(if ($legacy -eq 1) { 'так' } else { 'ні' }), $(if ($null -eq $wl) { 'не задано' } else { $wl })) 'Увімкнено' $(if ($ok) { 'ok' } else { 'risk' }) 'Середньо' 'GPO: System → LAPS → Configure password backup directory = Active Directory' 'Однаковий пароль локального адміна на всіх хостах = lateral movement з одного хешу'
+    }
+
+    # ── Облікові записи / служби / firewall ──
+    $guest = @($D.LocalUsers | Where-Object { ([string]$_.SID) -match '-501$' })
+    if ($guest.Count) { $ge = ([string]$guest[0].Enabled -eq 'True'); Add-Chk 'Облікові записи' 'Гість (RID 501)' $(if ($ge) { 'Увімкнено' } else { 'Вимкнено' }) 'Вимкнено' $(if ($ge) { 'risk' } else { 'ok' }) 'Високо' ("Disable-LocalUser -SID {0}" -f $guest[0].SID) 'Анонімний/гостьовий доступ до ресурсів' }
+    $sp = @($D.Services | Where-Object { $_.Name -eq 'Spooler' })
+    if ($sp.Count) {
+        $spRun = ($sp[0].State -eq 'Running')
+        if ($D.IsDC) { Add-Chk 'Служби' 'Print Spooler на контролері домену' $sp[0].State 'Зупинено і вимкнено' $(if ($spRun) { 'risk' } else { 'ok' }) 'Високо' 'Stop-Service Spooler; Set-Service Spooler -StartupType Disabled' 'PrintNightmare; примусова автентифікація DC (PrinterBug) → relay/делегування' }
+        else { Add-Chk 'Служби' 'Print Spooler' $sp[0].State 'Вимкнено, якщо друк не потрібен' 'na' }
+    }
+    foreach ($fp in @($D.FwProfiles)) {
+        $en = ($fp.Enabled -eq 'True')
+        Add-Chk 'Firewall' ("Профіль {0}" -f $fp.Profile) $(if ($en) { "Увімкнено, вхідні: $($fp.DefaultInbound)" } else { 'ВИМКНЕНО' }) 'Увімкнено, вхідні: Block' $(if ($en) { 'ok' } else { 'risk' }) 'Високо' ("Set-NetFirewallProfile -Name {0} -Enabled True" -f $fp.Profile) 'Без firewall усі служби хоста доступні з мережі'
+    }
+
+    # ── Оновлення ──
+    $hf = @(); try { $hf = @(Get-HotFix -ErrorAction Stop | Where-Object { $_.InstalledOn }) } catch {}
+    if ($hf.Count) {
+        $last = $hf | Sort-Object InstalledOn -Descending | Select-Object -First 1
+        $days = [math]::Round(((Get-Date) - [datetime]$last.InstalledOn).TotalDays)
+        $st = 'ok'; $sev = ''
+        if ($days -gt 60) { $st = 'risk'; $sev = 'Високо' } elseif ($days -gt 35) { $st = 'risk'; $sev = 'Середньо' }
+        Add-Chk 'Оновлення' 'Останнє встановлене оновлення' ("{0}, {1} ({2} дн. тому)" -f $last.HotFixID, ([datetime]$last.InstalledOn).ToString('yyyy-MM-dd'), $days) '≤ 35 днів (щомісячний цикл)' $st $sev 'Встановіть накопичувальні оновлення (Windows Update / WSUS)' 'Відомі вразливості без патчів. Джерело — Win32_QuickFixEngineering (не всі типи оновлень)'
+    } else { Add-Chk 'Оновлення' 'Останнє встановлене оновлення' 'Get-HotFix не повернув дат' '≤ 35 днів' 'unknown' }
+
+    $D.Hardening = Arr $rows
+    Save-Csv $D.Hardening '02_system\security_config_audit.csv'
+}
+
 # ════════════════════════════════════ 3. ЖУРНАЛИ ПОДІЙ ЗА ВІКНО ════════════════════════════════════
 Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776, зміни облікових записів, очищення журналів" {
     $rows = foreach ($e in (Get-Ev 'Security' @(4625))) {
@@ -1496,6 +1634,53 @@ Invoke-Step "3.8 PowerShell 4104 (Script Block Logging) — підозрілі �
     if ($selfSkipped) { Add-Note ("4104: пропущено {0} script block(ів), що є текстом самого коллектора (збіг шляху або вмісту) — щоб не давати хибних прапорців." -f $selfSkipped) }
     Save-Csv $D.Ps4104 '03_eventlogs\powershell_4104_suspicious.csv'
 }
+
+# ════════════════════════════════════ 3.9 ОРИГІНАЛЬНІ ЖУРНАЛИ (.evtx) ════════════════════════════════════
+# NIST SP 800-86: зберігати оригінальні дані, а не лише вибірки. Повний експорт журналу (wevtutil epl) — для
+# переаналізу іншими інструментами (Hayabusa, Chainsaw, EvtxECmd, Event Viewer) і перевірки висновків звіту.
+if (-not $NoEvtx) {
+    Invoke-Step "3.9 Експорт оригінальних журналів (.evtx) з hash — для переаналізу (Hayabusa, Chainsaw, EvtxECmd)" {
+        $dir = Join-Path $CaseDir '03_eventlogs\evtx'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $names = New-Object System.Collections.Generic.List[string]
+        foreach ($l in @($D.LogHealth | Where-Object { $_.Exists -eq $true })) { if (-not $names.Contains($l.Log)) { $names.Add($l.Log) } }
+        foreach ($x in 'Microsoft-Windows-WMI-Activity/Operational', 'Microsoft-Windows-Bits-Client/Operational', 'Microsoft-Windows-WinRM/Operational',
+                       'Microsoft-Windows-TerminalServices-RDPClient/Operational', 'Microsoft-Windows-SMBServer/Security', 'Microsoft-Windows-NTLM/Operational',
+                       'Directory Service', 'DNS Server') {
+            if (-not $names.Contains($x)) { $names.Add($x) }
+        }
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($n in $names) {
+            $li = $null
+            try { $li = Get-WinEvent -ListLog $n -ErrorAction Stop } catch { continue }   # журналу немає на цій системі (напр. Directory Service не на DC)
+            if (-not $li.RecordCount) {
+                $rows.Add([pscustomobject]@{ Log = $n; Records = 0; SizeMB = ''; File = ''; SHA256 = ''; Seconds = ''; Status = 'Порожній — не експортувався' })
+                continue
+            }
+            $file = Join-Path $dir (($n -replace '[\\/:*?"<>| ]', '_') + '.evtx')
+            $rel = $file.Substring($CaseDir.Length + 1)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $out = ((& wevtutil.exe epl $n $file /ow:true 2>&1) | Out-String).Trim()
+            $code = $LASTEXITCODE
+            $sw.Stop()
+            if ($code -eq 0 -and (Test-Path -LiteralPath $file)) {
+                $h = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+                $mb = [math]::Round((Get-Item -LiteralPath $file).Length / 1MB, 1)
+                $Integrity.Add([pscustomobject]@{ Source = "Журнал: $n"; Copy = $rel; Method = 'wevtutil epl (повний експорт)'; SHA256_Source_Before = 'н/д (живий журнал)'
+                    SHA256_Copy = $h; SHA256_Source_After = 'н/д'; Status = 'EXPORT: hash копії зафіксовано'; Error = '' })
+                Add-Custody 'EXPORT_EVTX' $n 'OK' ("{0} подій, {1} MB, {2:N1} с, sha256={3}" -f $li.RecordCount, $mb, $sw.Elapsed.TotalSeconds, $h)
+                $rows.Add([pscustomobject]@{ Log = $n; Records = $li.RecordCount; SizeMB = $mb; File = $rel; SHA256 = $h; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Status = 'OK' })
+            } else {
+                Add-Custody 'EXPORT_EVTX' $n 'FAIL' ("код {0}: {1}" -f $code, $out)
+                $rows.Add([pscustomobject]@{ Log = $n; Records = $li.RecordCount; SizeMB = ''; File = ''; SHA256 = ''; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Status = ("ПОМИЛКА (код {0}): {1}" -f $code, $out) })
+            }
+        }
+        $D.EvtxExport = Arr $rows
+        Save-Csv $D.EvtxExport '03_eventlogs\evtx_export.csv'
+        $fail = @($rows | Where-Object { $_.Status -like 'ПОМИЛКА*' })
+        if ($fail.Count) { Add-Note ("Експорт .evtx: {0} журнал(ів) не експортовано — див. 03_eventlogs\evtx_export.csv." -f $fail.Count) }
+    }
+} else { Add-Note 'Експорт оригінальних .evtx пропущено (-NoEvtx) — у справі лише CSV-вибірки журналів.' }
 
 # ════════════════════════════════════ 4. FIREWALL-ЛОГ (pfirewall.log) ════════════════════════════════════
 Invoke-Step "4. pfirewall.log: зведення по портах і джерелах, allow/drop, first/last, IOC IP" {
@@ -1955,6 +2140,9 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     foreach ($a in @($D.Autoruns | Where-Object { $_.Match -or $_.PathClass -in @('Нестандартний', 'Користувацький/тимчасовий', 'НЕСТАНДАРТНЕ значення') })) { Add-Flag 'Середньо' 'Персистентність' ("{0}: {1}" -f $a.Type, $a.Name) $a.Command 'persist' }
     foreach ($w in @($D.WmiPersist | Where-Object { -not $_.LikelyBenign })) { Add-Flag 'Високо' 'Персистентність' ("WMI-підписка {0}: {1}" -f $w.Class, $w.Name) $w.Details 'persist' }
     foreach ($l in @($D.LogHealth | Where-Object { $_.Severity -in 'Високо', 'Середньо' })) { Add-Flag $l.Severity 'Журнали' ("Журнал {0}: {1} MB, історія {2} дн." -f $l.Log, $l.MaxMB, $l.HistoryDays) $l.Advice 'system' }
+    foreach ($h in @($D.Hardening | Where-Object { $_.Status -eq 'Ризик' -and $_.Severity -in 'Високо', 'Середньо' })) {
+        Add-Flag $h.Severity 'Конфігурація' ("{0}: {1}" -f $h.Check, $h.Current) ("Рекомендовано: {0}. {1}. Виправлення: {2}" -f $h.Recommended, $h.Why, $h.Fix) 'hardening'
+    }
     $badAud = @($D.AuditSettings | Where-Object { $_.OK -eq $false })
     if ($badAud.Count) { Add-Flag 'Середньо' 'Аудит' ("Налаштування аудиту нижче рекомендованих: {0}" -f $badAud.Count) ((@($badAud | ForEach-Object { $_.Setting }) -join '; ')) 'system' }
     if ($D.PrefetchState -like '0*') { Add-Flag 'Інфо' 'Методологія' 'Prefetch вимкнено' 'Відсутність .pf — очікувана, не доказ відсутності запуску' 'integrity' }
@@ -2121,6 +2309,11 @@ Invoke-Step "8. Формування HTML-звіту" {
          (H3 'Профілі користувачів') + (HT $D.Profiles) + (H3 'Локальні облікові записи') + (HT $D.LocalUsers) + (H3 'Адміністратори') + (HT $D.LocalAdmins) +
          (H3 'Політика облікових записів (net accounts)') + (Pre $D.NetAccounts) + (H3 'Audit policy (auditpol)') + (Pre $D.AuditPol)
     [void]$S.Append((Sec 'system' '4. Система, журнали, аудит, облікові записи' $b -Count @($D.LogHealth | Where-Object { $_.Severity -in 'Високо','Середньо' }).Count))
+    $b = (H3 'Аудит конфігурації безпеки' 'Не «що сталося», а «наскільки хост вразливий». Колонка Fix — команда або політика для виправлення; Why — чим це загрожує.') +
+         (HT $D.Hardening -Cols @('Status', 'Severity', 'Area', 'Check', 'Current', 'Recommended', 'Fix', 'Why') -Csv '02_system\security_config_audit.csv' -RowClass { param($r) if ($r.Status -eq 'Ризик' -and $r.Severity -eq 'Високо') { 'bad' } elseif ($r.Status -eq 'Ризик') { 'warn' } elseif ($r.Status -eq 'OK') { 'good' } }) +
+         (H3 'Оригінальні журнали (.evtx)' 'Повний експорт (wevtutil epl) з SHA256 — для переаналізу Hayabusa / Chainsaw / EvtxECmd.') +
+         (HT $D.EvtxExport -Csv '03_eventlogs\evtx_export.csv' -Empty 'Експорт .evtx не виконувався (-NoEvtx) або журнали відсутні.' -RowClass { param($r) if ($r.Status -like 'ПОМИЛКА*') { 'bad' } elseif ($r.Status -eq 'OK') { 'good' } })
+    [void]$S.Append((Sec 'hardening' '4.1 Налаштування безпеки та оригінальні журнали' $b -Count @($D.Hardening | Where-Object { $_.Status -eq 'Ризик' }).Count))
 
     $b = (H3 'Зведення brute-force (4625)' 'Кількість — за локальним журналом Security (не лічильник rule.firedtimes Wazuh).') + (HT $D.BruteForce -Csv '03_eventlogs\bruteforce_summary.csv' -RowClass { param($r) if ($r.Attempts -ge 10) { 'bad' } }) +
          (H3 'Кореляція джерела: 4625 ↔ pfirewall.log ↔ RDP (±15 хв)' 'NIST 6.4.4: IP-адреса — кандидат, не доказ ідентичності.') + (HT $D.Correlation -Csv '03_eventlogs\bruteforce_source_correlation.csv' -RowClass $rcIoc) +
@@ -2222,7 +2415,7 @@ function flt(inp,id){var q=inp.value.toLowerCase();var rows=document.getElementB
 function srt(th){var t=th.closest('table'),i=Array.prototype.indexOf.call(th.parentNode.children,th),b=t.tBodies[0],r=Array.prototype.slice.call(b.rows);var d=th.getAttribute('data-d')==='a'?'d':'a';th.setAttribute('data-d',d);
 r.sort(function(x,y){var a=x.cells[i].innerText,c=y.cells[i].innerText,na=parseFloat(a),nc=parseFloat(c);var v=(/^-?[\d.]+$/.test(a)&&/^-?[\d.]+$/.test(c))?na-nc:a.localeCompare(c);return d==='a'?v:-v;});r.forEach(function(x){b.appendChild(x);});}
 '@
-    $navItems = @(@('summary', 'Огляд і прапорці'), @('integrity', 'Цілісність / NIST'), @('volatile', 'Волатильні дані'), @('system', 'Система'), @('auth', 'Автентифікація'),
+    $navItems = @(@('summary', 'Огляд і прапорці'), @('integrity', 'Цілісність / NIST'), @('volatile', 'Волатильні дані'), @('system', 'Система'), @('hardening', 'Налаштування безпеки'), @('auth', 'Автентифікація'),
                   @('rdp', 'RDP'), @('services', 'Служби'), @('tasks', 'Задачі'), @('persist', 'Персистентність'), @('firewall', 'Firewall'), @('defender', 'Defender'),
                   @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
     $nav = (@($navItems | ForEach-Object { "<a href='#$($_[0])'>$(E $_[1])</a>" }) -join '')

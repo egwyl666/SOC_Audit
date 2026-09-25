@@ -7,7 +7,7 @@
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207.x-5391FE?logo=powershell&logoColor=white)](#1-вимоги)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011%20%7C%20Server%202016--2025-0078D6?logo=windows&logoColor=white)](#1-вимоги)
 [![NIST SP 800-86](https://img.shields.io/badge/NIST-SP%20800--86-2E7D32)](https://csrc.nist.gov/pubs/sp/800/86/final)
-[![Version](https://img.shields.io/badge/version-1.2-informational)](soc-collect.ps1)
+[![Version](https://img.shields.io/badge/version-1.3-informational)](soc-collect.ps1)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#1-вимоги)
 
 [🇬🇧 English](README.md) · **🇺🇦 Українська**
@@ -16,7 +16,7 @@
 
 ---
 
-`soc-collect.ps1` — **SOC Live Response Collector v1.2**. Замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`
+`soc-collect.ps1` — **SOC Live Response Collector v1.3**. Замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`
 одним файлом: збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти,
 корелює їх, будує timeline і автономний HTML-звіт — з chain of custody та SHA256-маніфестом.
 Порядок і принципи роботи узгоджено з **NIST SP 800-86**.
@@ -91,7 +91,8 @@ powershell.exe -ExecutionPolicy Bypass -File C:\1\soc-collect.ps1 -CaseId INC-09
 > [!NOTE]
 > Перевірено: v1.0 — повний прогін на Windows 11 / PowerShell 5.1.26100, **34/34 кроки без помилок**.
 > v1.1 — повний прогін на контролері домену (Windows Server, PS 5.1), 64- і 32-біт: 35/35 кроків OK; знахідки цього прогону — основа виправлень v1.2.
-> v1.2 пройшла перевірку парсером і unit-тести змінених функцій; повторний прогін на Windows — попереду, див. [CHANGELOG](CHANGELOG.md).
+> v1.2 — повторний прогін на тому ж DC (64-біт і автоперезапуск з 32-біт): усі кроки OK, виправлення підтверджено.
+> v1.3 додає нові кроки (аудит конфігурації безпеки, експорт `.evtx`); парсер і unit-тести пройдено, прогін на Windows — попереду, див. [CHANGELOG](CHANGELOG.md).
 
 > [!TIP]
 > Завантажуйте скрипт через **Download raw file** або `git clone` — репозиторій зберігає файл побайтно
@@ -193,6 +194,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-SkipEvidenceCopy` | Без копій історії браузерів / Timeline / PS history / pfirewall.log | Hunting на багатьох хостах |
 | `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache через `esentutl /vss` | Глибока форензика. ⚠️ Створює тіньову копію — змінює систему (фіксується в custody) |
 | `-UsnJournal` | Вибірка з USN-журналу за масками | Потрібно знати, коли файли створювалися/видалялися. Довго |
+| `-NoEvtx` | Без експорту оригінальних `.evtx` (крок 3.9) | Hunting на багатьох хостах / мало місця. За замовчуванням журнали експортуються повністю — на DC Security може бути 1+ ГБ, тому `-OutRoot` на зовнішній диск |
 | `-NoZip` | Без ZIP-архіву | Коли архів не потрібен |
 
 ---
@@ -267,8 +269,8 @@ flowchart LR
 |---|---|
 | **0. Pre-flight** | SHA256 скрипта, час/таймзона/NTP, NTFS last-access, Prefetch, профілі користувачів |
 | **1. Волатильні** | Спочатку швидкий знімок (TCP/UDP → процеси), далі ARP/NDP, DNS-кеш, IP/маршрути, SMB; лише потім — власник/hash/підпис процесів і сесії |
-| **2. Система** | Облікові записи, адміни, політики, служби, задачі (автор з XML), автозапуск, WMI, Defender, ліцензування/KMS, firewall, **журнали подій (розмір/глибина/покриття) та налаштування аудиту** |
-| **3. Журнали за вікно** | 4625/4624/4648/4740/4776, зміни облікових записів, очищення журналів, RDP (1149, 21–25, 131, 140), служби (7045/4697/7040), задачі (4698–4702, TaskScheduler), зміни firewall (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC-запуски (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 |
+| **2. Система** | Облікові записи, адміни, політики, служби, задачі (автор з XML), автозапуск, WMI, Defender, ліцензування/KMS, firewall, **журнали подій (розмір/глибина/покриття) та налаштування аудиту**  **Аудит конфігурації безпеки** (SMBv1/signing, LLMNR/NetBIOS, WDigest, LSA PPL, Credential Guard, NTLM/LM, UAC, RDP NLA, PowerShell v2, BitLocker, ASR, LAPS, Гість, Spooler на DC, профілі firewall, останнє оновлення) |
+| **3. Журнали за вікно** | 4625/4624/4648/4740/4776, зміни облікових записів, очищення журналів, RDP (1149, 21–25, 131, 140), служби (7045/4697/7040), задачі (4698–4702, TaskScheduler), зміни firewall (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC-запуски (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 ; **повний експорт оригінальних `.evtx`** з SHA256 |
 | **4. pfirewall.log** | Зведення по портах і джерелах, ALLOW/DROP, first/last, евристики (ICMP-розвідка, RDP/SMB, сканування), IOC IP |
 | **5. Файлові артефакти** | Відомі шляхи, пошук за масками, LNK (з ціллю), BAM/DAM, Prefetch, кошик ($I), Zone.Identifier, копії історії браузерів / Windows Timeline / PS history з пошуком підказок |
 | **6. Аналіз** | Зведення brute-force, кореляція 4625 ↔ firewall ↔ RDP, IOC-збіги, автоматичні прапорці |
@@ -292,6 +294,8 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── manifest.csv.sha256          ← hash маніфесту
 ├── 00_tool\                     ← копія скрипта, яким збирали
 ├── 01_volatile\  02_system\  03_eventlogs\  04_firewall\  05_artifacts\
+├── 02_system\security_config_audit.csv  ← аудит налаштувань безпеки
+├── 03_eventlogs\evtx\                  ← оригінальні журнали (.evtx) + evtx_export.csv
 └── 06_evidence_copies\          ← верифіковані копії (браузери, pfirewall.log, кущі)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
 ```
@@ -301,7 +305,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 ### 📊 HTML-звіт
 
-- Бокове меню — 17 розділів
+- Бокове меню — 18 розділів, зокрема **4.1 Налаштування безпеки** (поточне / рекомендоване / виправлення / чому) і таблиця експорту `.evtx`
 - Картки-лічильники та таблиця прапорців з рівнем (Критично / Високо / Середньо / Інфо)
 - У кожній таблиці: **фільтр** (поле пошуку) і **сортування** (клік по заголовку)
 - Підсвітка: 🟥 IOC / критично, 🟧 підозріло, 🟩 VERIFIED / OK
@@ -320,7 +324,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 | Кодування | UTF-8 з BOM — 5.1 читає кирилицю коректно |
 | Модулі | Лише вбудовані: NetSecurity, NetTCPIP, ScheduledTasks, Defender, LocalAccounts, CimCmdlets |
 | Локалізація ОС | Дані з журналів беруться з XML (не з локалізованого тексту); `auditpol` — розбір EN/RU/UA |
-| Перевірено | v1.0: Windows 11 + PS 5.1.26100, 34/34 OK; v1.1: контролер домену, PS 5.1 64/32-біт, 35/35 OK; v1.2: парсер + unit-тести, повторний прогін — попереду |
+| Перевірено | v1.0: Windows 11 + PS 5.1.26100, 34/34 OK; v1.1: контролер домену, PS 5.1 64/32-біт, 35/35 OK; v1.2: повторний прогін на DC OK; v1.3: парсер + unit-тести, прогін на Windows — попереду |
 
 ---
 
