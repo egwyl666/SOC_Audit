@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.4] — 2026-09-25
+
+Active Directory — two new, independent steps that run **only on a domain controller** (elsewhere: one line in notes).
+Status: parser check and unit tests passed (22 synthetic events for the AD event parser); **Windows run pending**.
+
+### Added
+- **Step 2.10 — AD configuration** (LDAP via System.DirectoryServices, read-only, no RSAT): kerberoastable users
+  (SPN, RC4 allowed, privileged), AS-REP-roastable users (DONT_REQ_PREAUTH), unconstrained delegation on non-DCs,
+  krbtgt password age, privileged accounts with PASSWD_NOTREQD / non-expiring password, all users with PASSWD_NOTREQD,
+  ms-DS-MachineAccountQuota, minimum password length, lockout threshold, direct members of Domain/Enterprise/Schema
+  Admins and Administrators (found by SID — independent of OS language).
+  Output: `02_system\ad_config.csv`, `02_system\ad_risky_accounts.csv`.
+- **Step 3.10 — AD attack signs in the Security log** (filtered in XPath so the `-MaxEvents` budget is spent on
+  suspicious events only): Kerberoasting (4769 with RC4/DES, grouped by requester+IP, ≥5 SPNs → High), AS-REP roasting
+  (4768 without preauth), Kerberos password spraying / brute-force (4771 0x18 by source / by account), DCSync (4662 with
+  replication GUIDs from a non-machine account → Critical; MSOL_/AAD_ → High), privileged group changes
+  (4728/4732/4756 and removals, by group SID + DnsAdmins), dangerous userAccountControl changes (4738/4742:
+  no preauth, unconstrained / protocol-transition delegation, PASSWD_NOTREQD, DES), 5136 on msDS-KeyCredentialLink
+  (Shadow Credentials), RBCD, gPCFileSysPath, user SPNs and ACL changes of AdminSDHolder / domain root.
+  Audit coverage is checked first (7 subcategories); a subcategory that is not audited is reported —
+  "no events" then proves nothing. Output: `03_eventlogs\ad_attack_findings.csv`, `ad_attack_events.csv`,
+  `ad_audit_coverage.csv`; flags, timeline, report section **5.1 Active Directory**.
+
+### Changed
+- Step 2.9: on a DC `LmCompatibilityLevel` < 5 is now a Medium risk (the DC accepts NTLMv1 from clients).
+- Step 2.9: firewall `DefaultInbound = NotConfigured` is shown as "NotConfigured (= Block by default)".
+
 ## [1.3] — 2026-09-25
 
 New, independent steps only — existing steps are unchanged (except the order inside the 1.1 snapshot).

@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.3 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.4 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -153,7 +153,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.3'
+$ToolVersion = '1.4'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -218,7 +218,7 @@ $DataKeys = 'TcpRaw','UdpRaw','ProcRaw','Procs','Tcp','Udp','Arp','Dns','IpAddr'
             'LocalUsers','LocalAdmins','Services','Tasks','Autoruns','WmiPersist','MpExclusions','MpStatusRows','Licensing','KmsReg',
             'FwProfiles','FwRules','Ev4625','Ev4624','OtherAuth','LogCleared','Rdp','RdpSummary','SvcEvents','TaskEvents',
             'FwEvents','MpEvents','Exec','SysmonMisc','Ps4104','FwByPort','FwBySource','FwIocRaw','FwSvcHits','KnownFiles',
-            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
+            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
 foreach ($k in $DataKeys) { $D[$k] = @() }
 
 $Lolbins = @('netsh.exe','wmic.exe','reg.exe','sc.exe','schtasks.exe','cscript.exe','wscript.exe','mshta.exe','rundll32.exe',
@@ -1300,7 +1300,10 @@ Invoke-Step "2.9 Налаштування безпеки: SMB, LLMNR/NetBIOS, WD
     Add-Chk 'NTLM' 'Зберігання LM-хешів (NoLMHash)' $(if ($null -eq $nolm) { 'не задано (1 за замовчуванням)' } else { $nolm }) '1' $(if ($nolm -eq 0) { 'risk' } else { 'ok' }) 'Високо' 'reg add HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v NoLMHash /t REG_DWORD /d 1 /f' 'LM-хеш зламується за хвилини'
     $lmc = Get-RegValue $lsa 'LmCompatibilityLevel'
     $lmv = 3; if ($null -ne $lmc) { $lmv = [int]$lmc }
-    Add-Chk 'NTLM' 'LmCompatibilityLevel' $(if ($null -eq $lmc) { 'не задано (3 за замовчуванням)' } else { $lmc }) '5 (лише NTLMv2), мінімум 3' $(if ($lmv -lt 3) { 'risk' } else { 'ok' }) 'Високо' 'GPO: Network security: LAN Manager authentication level = Send NTLMv2 response only. Refuse LM & NTLM' 'LM/NTLMv1 дозволяють відновити хеш з перехопленого трафіку'
+    # На DC рівень визначає, що контролер ПРИЙМАЄ від клієнтів: < 5 — приймає NTLMv1 (і LM при < 4)
+    if ($D.IsDC) { $lmState = $(if ($lmv -ge 5) { 'ok' } else { 'risk' }); $lmSev = $(if ($lmv -lt 3) { 'Високо' } else { 'Середньо' }); $lmRec = '5 (DC відхиляє LM і NTLMv1)' }
+    else { $lmState = $(if ($lmv -lt 3) { 'risk' } else { 'ok' }); $lmSev = 'Високо'; $lmRec = '5 (лише NTLMv2), мінімум 3' }
+    Add-Chk 'NTLM' 'LmCompatibilityLevel' $(if ($null -eq $lmc) { 'не задано (3 за замовчуванням)' } else { $lmc }) $lmRec $lmState $lmSev 'GPO: Network security: LAN Manager authentication level = Send NTLMv2 response only. Refuse LM & NTLM' 'LM/NTLMv1 дозволяють відновити хеш з перехопленого трафіку'
     $ras = Get-RegValue $lsa 'RestrictAnonymousSAM'
     Add-Chk 'NTLM' 'Анонімний перелік SAM (RestrictAnonymousSAM)' $(if ($null -eq $ras) { 'не задано (1 за замовчуванням)' } else { $ras }) '1' $(if ($ras -eq 0) { 'risk' } else { 'ok' }) 'Середньо' 'reg add HKLM\SYSTEM\CurrentControlSet\Control\Lsa /v RestrictAnonymousSAM /t REG_DWORD /d 1 /f' 'Анонімна розвідка облікових записів'
 
@@ -1367,7 +1370,8 @@ Invoke-Step "2.9 Налаштування безпеки: SMB, LLMNR/NetBIOS, WD
     }
     foreach ($fp in @($D.FwProfiles)) {
         $en = ($fp.Enabled -eq 'True')
-        Add-Chk 'Firewall' ("Профіль {0}" -f $fp.Profile) $(if ($en) { "Увімкнено, вхідні: $($fp.DefaultInbound)" } else { 'ВИМКНЕНО' }) 'Увімкнено, вхідні: Block' $(if ($en) { 'ok' } else { 'risk' }) 'Високо' ("Set-NetFirewallProfile -Name {0} -Enabled True" -f $fp.Profile) 'Без firewall усі служби хоста доступні з мережі'
+        $inb = [string]$fp.DefaultInbound; if ($inb -eq 'NotConfigured') { $inb = 'NotConfigured (= Block за замовчуванням)' }
+        Add-Chk 'Firewall' ("Профіль {0}" -f $fp.Profile) $(if ($en) { "Увімкнено, вхідні: $inb" } else { 'ВИМКНЕНО' }) 'Увімкнено, вхідні: Block' $(if ($en) { 'ok' } else { 'risk' }) 'Високо' ("Set-NetFirewallProfile -Name {0} -Enabled True" -f $fp.Profile) 'Без firewall усі служби хоста доступні з мережі'
     }
 
     # ── Оновлення ──
@@ -1383,6 +1387,112 @@ Invoke-Step "2.9 Налаштування безпеки: SMB, LLMNR/NetBIOS, WD
     $D.Hardening = Arr $rows
     Save-Csv $D.Hardening '02_system\security_config_audit.csv'
 }
+
+# ════════════════════════════════════ 2.10 ACTIVE DIRECTORY: КОНФІГУРАЦІЯ ДОМЕНУ ════════════════════════════════════
+# Лише на контролері домену. Тільки читання LDAP через System.DirectoryServices (без RSAT / модуля ActiveDirectory).
+# Шукаємо те, що атакують найчастіше: цілі Kerberoasting / AS-REP roasting, неконтрольоване делегування, старий krbtgt,
+# слабкі прапорці привілейованих облікових записів, MachineAccountQuota, парольну політику, склад привілейованих груп.
+if ($D.IsDC) {
+    Invoke-Step "2.10 Active Directory: конфігурація домену (цілі Kerberoasting/AS-REP, делегування, krbtgt, привілейовані групи)" {
+        $rows = New-Object System.Collections.Generic.List[object]
+        $objs = New-Object System.Collections.Generic.List[object]
+        function Add-AdChk {   # той самий формат, що й у 2.9; State: ok / risk / info / unknown
+            param([string]$Check, $Current, [string]$Recommended, [string]$State, [string]$Sev = '', [string]$Fix = '', [string]$Why = '')
+            $st = switch ($State) { 'ok' { 'OK' } 'risk' { 'Ризик' } 'info' { 'Інфо' } default { 'Невідомо' } }
+            if ($State -ne 'risk') { $Sev = '' }
+            if ($State -eq 'ok') { $Fix = '' }
+            $rows.Add([pscustomobject]@{ Area = 'Active Directory'; Check = $Check; Current = [string]$Current; Recommended = $Recommended; Status = $st; Severity = $Sev; Fix = $Fix; Why = $Why })
+        }
+        $rootDse = [ADSI]'LDAP://RootDSE'
+        $dn = [string]$rootDse.defaultNamingContext
+        if (-not $dn) { throw 'RootDSE недоступний — LDAP-запити неможливі' }
+        $D.AdDomainDN = $dn
+        $domain = [ADSI]"LDAP://$dn"
+        $domSid = ([Security.Principal.SecurityIdentifier]::new([byte[]]$domain.objectSid[0], 0)).Value
+        function Find-Ad {
+            param([string]$Filter, [string[]]$Props)
+            $srch = New-Object DirectoryServices.DirectorySearcher($domain)
+            $srch.Filter = $Filter; $srch.PageSize = 1000; $srch.SizeLimit = 0
+            foreach ($pp in $Props) { [void]$srch.PropertiesToLoad.Add($pp) }
+            $res = $srch.FindAll()
+            try { return @(foreach ($r in $res) { $r }) } finally { $res.Dispose(); $srch.Dispose() }
+        }
+        function PV { param($r, [string]$n) $v = $r.Properties[$n.ToLowerInvariant()]; if ($v -and $v.Count) { return $v[0] }; return $null }
+        function FT { param($v) if ($null -eq $v -or [int64]$v -le 0 -or [int64]$v -eq [int64]::MaxValue) { return $null }; return [DateTime]::FromFileTimeUtc([int64]$v) }
+        $enabledUser = '(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2))'
+        $now = (Get-Date).ToUniversalTime()
+        Add-Custody 'LDAP_QUERY' $dn 'OK' 'Початок LDAP-запитів (лише читання)'
+
+        # ── Kerberoasting: користувачі (не компʼютери) з SPN ──
+        $spnU = @(Find-Ad "(&$enabledUser(servicePrincipalName=*)(!(sAMAccountName=krbtgt)))" @('sAMAccountName', 'servicePrincipalName', 'adminCount', 'pwdLastSet', 'msDS-SupportedEncryptionTypes'))
+        $spnAdm = 0
+        foreach ($r in $spnU) {
+            $enc = PV $r 'msDS-SupportedEncryptionTypes'; $aesOnly = ($null -ne $enc -and ([int]$enc -band 0x18) -and -not ([int]$enc -band 0x4))
+            $pls = FT (PV $r 'pwdLastSet'); $age = ''; if ($pls) { $age = [math]::Round(($now - $pls).TotalDays) }
+            $adm = ((PV $r 'adminCount') -eq 1); if ($adm) { $spnAdm++ }
+            $objs.Add([pscustomobject]@{ Category = 'Kerberoastable (користувач із SPN)'; Account = (PV $r 'sAMAccountName'); Privileged = $adm; PwdAgeDays = $age
+                Details = ("SPN: {0}; шифрування: {1}" -f ((@($r.Properties['serviceprincipalname']) | Select-Object -First 3) -join ', '), $(if ($aesOnly) { 'лише AES' } else { 'RC4 дозволено' })) })
+        }
+        Add-AdChk 'Kerberoastable: користувачі з SPN' ("{0} (з них привілейованих: {1})" -f $spnU.Count, $spnAdm) '0 або gMSA / паролі 25+ символів, лише AES' $(if ($spnU.Count) { 'risk' } else { 'ok' }) $(if ($spnAdm) { 'Високо' } else { 'Середньо' }) 'Перевести сервіси на gMSA; довгі випадкові паролі; msDS-SupportedEncryptionTypes = 0x18 (AES)' 'Будь-який користувач домену може запросити квиток і підібрати пароль офлайн (Kerberoasting)'
+
+        # ── AS-REP roasting: без Kerberos preauth ──
+        $asrep = @(Find-Ad "(&$enabledUser(userAccountControl:1.2.840.113556.1.4.803:=4194304))" @('sAMAccountName', 'adminCount'))
+        foreach ($r in $asrep) { $objs.Add([pscustomobject]@{ Category = 'AS-REP roastable (без preauth)'; Account = (PV $r 'sAMAccountName'); Privileged = ((PV $r 'adminCount') -eq 1); PwdAgeDays = ''; Details = 'DONT_REQ_PREAUTH' }) }
+        Add-AdChk 'AS-REP roastable: без Kerberos preauth' $asrep.Count '0' $(if ($asrep.Count) { 'risk' } else { 'ok' }) 'Високо' 'Set-ADAccountControl <user> -DoesNotRequirePreAuth $false (або зняти прапорець у властивостях облікового запису)' 'Хеш пароля можна отримати без жодних облікових даних (AS-REP roasting)'
+
+        # ── Неконтрольоване делегування (крім DC) ──
+        $unc = @(Find-Ad '(&(userAccountControl:1.2.840.113556.1.4.803:=524288)(!(userAccountControl:1.2.840.113556.1.4.803:=8192))(!(userAccountControl:1.2.840.113556.1.4.803:=2)))' @('sAMAccountName', 'objectClass'))
+        foreach ($r in $unc) { $objs.Add([pscustomobject]@{ Category = 'Неконтрольоване делегування'; Account = (PV $r 'sAMAccountName'); Privileged = ''; PwdAgeDays = ''; Details = 'TRUSTED_FOR_DELEGATION' }) }
+        Add-AdChk 'Неконтрольоване делегування (не DC)' $unc.Count '0' $(if ($unc.Count) { 'risk' } else { 'ok' }) 'Високо' 'Замінити на constrained / resource-based delegation; критичні облікові записи — у Protected Users або "Account is sensitive and cannot be delegated"' 'Хост кешує TGT усіх, хто до нього підключається: компрометація = квитки адміністраторів (PrinterBug + unconstrained)'
+
+        # ── krbtgt ──
+        $kt = @(Find-Ad '(sAMAccountName=krbtgt)' @('pwdLastSet'))
+        if ($kt.Count) {
+            $kp = FT (PV $kt[0] 'pwdLastSet'); $kd = $(if ($kp) { [math]::Round(($now - $kp).TotalDays) } else { $null })
+            Add-AdChk 'Вік пароля krbtgt' $(if ($null -ne $kd) { "{0} дн. (змінено {1})" -f $kd, $kp.ToString('yyyy-MM-dd') } else { 'невідомо' }) '≤ 180 днів; після інциденту — двічі з інтервалом' $(if ($null -eq $kd) { 'unknown' } elseif ($kd -gt 180) { 'risk' } else { 'ok' }) 'Середньо' 'Скидання krbtgt двічі з паузою ≥ часу життя квитка (скрипт Microsoft New-KrbtgtKeys.ps1)' 'Старий ключ krbtgt продовжує життя Golden Ticket'
+        }
+
+        # ── Привілейовані облікові записи (adminCount=1) і прапорці паролів ──
+        $adm = @(Find-Ad "(&$enabledUser(adminCount=1))" @('sAMAccountName', 'userAccountControl', 'pwdLastSet', 'lastLogonTimestamp'))
+        $admNoExp = 0; $admNoReq = 0
+        foreach ($r in $adm) {
+            $uac = [int](PV $r 'userAccountControl'); $f = @()
+            if ($uac -band 0x10000) { $f += 'пароль без терміну дії'; $admNoExp++ }
+            if ($uac -band 0x20) { $f += 'PASSWD_NOTREQD'; $admNoReq++ }
+            $pls = FT (PV $r 'pwdLastSet'); $ll = FT (PV $r 'lastLogonTimestamp')
+            $objs.Add([pscustomobject]@{ Category = 'Привілейований (adminCount=1)'; Account = (PV $r 'sAMAccountName'); Privileged = $true
+                PwdAgeDays = $(if ($pls) { [math]::Round(($now - $pls).TotalDays) } else { '' })
+                Details = ("{0}; останній вхід ≈ {1}" -f $(if ($f) { $f -join ', ' } else { 'прапорці OK' }), $(if ($ll) { $ll.ToString('yyyy-MM-dd') } else { 'ніколи/невідомо' })) })
+        }
+        Add-AdChk 'Привілейовані з PASSWD_NOTREQD' $admNoReq '0' $(if ($admNoReq) { 'risk' } else { 'ok' }) 'Високо' 'Зняти прапорець PASSWD_NOTREQD, задати пароль' 'Обліковий запис може мати порожній пароль'
+        Add-AdChk 'Привілейовані з паролем без терміну дії' ("{0} з {1}" -f $admNoExp, $adm.Count) '0 (крім break-glass із контролем)' $(if ($admNoExp) { 'risk' } else { 'ok' }) 'Середньо' 'Зняти "Password never expires" або керувати паролем через PAM/LAPS' 'Роками незмінні паролі адміністраторів'
+        $noReq = @(Find-Ad "(&$enabledUser(userAccountControl:1.2.840.113556.1.4.803:=32))" @('sAMAccountName'))
+        Add-AdChk 'Усі користувачі з PASSWD_NOTREQD' $noReq.Count '0' $(if ($noReq.Count) { 'risk' } else { 'ok' }) 'Середньо' 'Get-ADUser -Filter {PasswordNotRequired -eq $true} | Set-ADUser -PasswordNotRequired $false' 'Можливі облікові записи з порожнім паролем'
+
+        # ── Домен: MachineAccountQuota, парольна політика ──
+        $maq = $domain.'ms-DS-MachineAccountQuota'; $maqV = $(if ($maq -and $maq.Count) { [int]$maq[0] } else { $null })
+        Add-AdChk 'ms-DS-MachineAccountQuota' $(if ($null -eq $maqV) { 'невідомо' } else { $maqV }) '0' $(if ($null -eq $maqV) { 'unknown' } elseif ($maqV -gt 0) { 'risk' } else { 'ok' }) 'Середньо' 'Set-ADDomain -Identity <domain> -Replace @{"ms-DS-MachineAccountQuota"="0"}' 'Будь-який користувач може створити обʼєкт компʼютера — основа атак RBCD / noPac'
+        $mpl = $domain.minPwdLength; $mplV = $(if ($mpl -and $mpl.Count) { [int]$mpl[0] } else { $null })
+        Add-AdChk 'Мінімальна довжина пароля (Default Domain Policy)' $(if ($null -eq $mplV) { 'невідомо' } else { $mplV }) '≥ 14 (або FGPP для адмінів)' $(if ($null -eq $mplV) { 'unknown' } elseif ($mplV -lt 12) { 'risk' } else { 'ok' }) 'Середньо' 'GPO Default Domain Policy → Password Policy → Minimum password length' 'Короткі паролі — password spraying і офлайн-підбір'
+        $lt = $domain.lockoutThreshold; $ltV = $(if ($lt -and $lt.Count) { [int]$lt[0] } else { $null })
+        Add-AdChk 'Поріг блокування облікових записів' $(if ($null -eq $ltV) { 'невідомо' } elseif ($ltV -eq 0) { '0 (блокування вимкнено)' } else { $ltV }) '5–10 спроб' $(if ($null -eq $ltV) { 'unknown' } elseif ($ltV -eq 0) { 'risk' } else { 'ok' }) 'Середньо' 'GPO Default Domain Policy → Account Lockout Policy' 'Без блокування підбір паролів необмежений'
+
+        # ── Склад привілейованих груп (за SID — не залежить від мови ОС; лише прямі члени) ──
+        foreach ($g in @(@{ Sid = "$domSid-512"; N = 'Domain Admins' }, @{ Sid = "$domSid-519"; N = 'Enterprise Admins' }, @{ Sid = "$domSid-518"; N = 'Schema Admins' }, @{ Sid = 'S-1-5-32-544'; N = 'Administrators' })) {
+            $gr = @(Find-Ad ("(objectSid={0})" -f $g.Sid) @('member', 'sAMAccountName'))
+            if (-not $gr.Count) { continue }   # Enterprise/Schema Admins існують лише в кореневому домені лісу
+            $mem = @($gr[0].Properties['member'] | ForEach-Object { ([string]$_ -split ',')[0] -replace '^CN=', '' })
+            foreach ($m in $mem) { $objs.Add([pscustomobject]@{ Category = "Член групи $($g.N)"; Account = $m; Privileged = $true; PwdAgeDays = ''; Details = "прямий член $(PV $gr[0] 'sAMAccountName')" }) }
+            $st = 'info'; if ($g.N -eq 'Schema Admins' -and $mem.Count) { $st = 'risk' }
+            Add-AdChk ("Склад групи {0} ({1})" -f $g.N, (PV $gr[0] 'sAMAccountName')) ("{0} прямих членів: {1}" -f $mem.Count, (($mem | Select-Object -First 10) -join ', ')) $(if ($g.N -eq 'Schema Admins') { '0 (додавати лише на час змін схеми)' } else { 'мінімум, лише іменовані адмін-облікові записи' }) $st 'Середньо' 'Прибрати зайвих членів; вкладені групи перевірити окремо' 'Кожен член — повний контроль над доменом/лісом'
+        }
+
+        $D.AdConfig = Arr $rows
+        $D.AdObjects = Arr $objs
+        Save-Csv $D.AdConfig '02_system\ad_config.csv'
+        Save-Csv $D.AdObjects '02_system\ad_risky_accounts.csv'
+    }
+} else { Add-Note 'Хост не є контролером домену — кроки аудиту Active Directory (2.10, 3.10) пропущено.' }
 
 # ════════════════════════════════════ 3. ЖУРНАЛИ ПОДІЙ ЗА ВІКНО ════════════════════════════════════
 Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776, зміни облікових записів, очищення журналів" {
@@ -1633,6 +1743,181 @@ Invoke-Step "3.8 PowerShell 4104 (Script Block Logging) — підозрілі �
     $D.Ps4104 = Arr ($rows | Sort-Object TimeUtc)
     if ($selfSkipped) { Add-Note ("4104: пропущено {0} script block(ів), що є текстом самого коллектора (збіг шляху або вмісту) — щоб не давати хибних прапорців." -f $selfSkipped) }
     Save-Csv $D.Ps4104 '03_eventlogs\powershell_4104_suspicious.csv'
+}
+
+# ════════════════════════════════════ 3.10 ACTIVE DIRECTORY: ОЗНАКИ АТАК У ЖУРНАЛАХ ════════════════════════════════════
+# Лише на DC. Фільтрація в XPath (тип шифрування, preauth, AccessMask, атрибут) — щоб у ліміт -MaxEvents потрапляли
+# саме підозрілі події, а не мільйони штатних квитків. Спершу перевіряємо, чи потрібні підкатегорії взагалі аудитуються:
+# якщо ні — «подій немає» нічого не доводить (NIST: відсутність даних ≠ відсутність події).
+$AdReplGuids = @{ '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2' = 'DS-Replication-Get-Changes'; '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2' = 'DS-Replication-Get-Changes-All'
+                  '89e95b76-444d-4c62-991a-0facbeda640c' = 'DS-Replication-Get-Changes-In-Filtered-Set' }
+$AdUacCodes = @{ '%%2096' = @('Високо', "Вимкнено Kerberos preauth (DONT_REQ_PREAUTH) — підготовка AS-REP roasting")
+                 '%%2093' = @('Високо', 'Увімкнено неконтрольоване делегування (TRUSTED_FOR_DELEGATION)')
+                 '%%2098' = @('Середньо', 'Увімкнено делегування з протокольним переходом (TRUSTED_TO_AUTH_FOR_DELEGATION)')
+                 '%%2082' = @('Середньо', 'Встановлено PASSWD_NOTREQD (пароль не обовʼязковий)')
+                 '%%2095' = @('Середньо', 'Увімкнено USE_DES_KEY_ONLY') }
+$AdPrivGroupRx = '(-512|-518|-519|-520)$|^S-1-5-32-(544|548|549|551)$'   # DA, Schema, EA, GPO Creators; Administrators, Account/Server/Backup Operators
+
+function Get-AdAttackRow {   # одна подія (Id + словник EventData) -> рядок з технікою і рівнем, або $null якщо штатна
+    param([int]$Id, $d, [string]$DomainDN = '')
+    $ip = ([string]$d['IpAddress']) -replace '^::ffff:', ''
+    $row = $null
+    switch ($Id) {
+        4769 {
+            $svc = [string]$d['ServiceName']
+            if ($svc -match '\$$' -or $svc -match '^(?i)krbtgt') { return $null }
+            $row = @{ Technique = 'Kerberoasting (слабке шифрування квитка)'; Severity = 'Середньо'; Actor = [string]$d['TargetUserName']; Target = $svc
+                      Details = ("шифрування {0}" -f $d['TicketEncryptionType']) }
+        }
+        4768 {
+            $row = @{ Technique = 'AS-REP roasting (квиток без preauth)'; Severity = 'Високо'; Actor = ''; Target = [string]$d['TargetUserName']
+                      Details = ("PreAuthType={0}; шифрування {1}" -f $d['PreAuthType'], $d['TicketEncryptionType']) }
+        }
+        4771 {
+            $row = @{ Technique = 'Невдала Kerberos preauth (підбір / spraying)'; Severity = 'Інфо'; Actor = ''; Target = [string]$d['TargetUserName']; Details = ("Status={0}" -f $d['Status']) }
+        }
+        4662 {
+            $props = ([string]$d['Properties']).ToLowerInvariant()
+            $hit = @($AdReplGuids.Keys | Where-Object { $props.Contains($_) } | ForEach-Object { $AdReplGuids[$_] })
+            if (-not $hit.Count) { return $null }
+            $actor = [string]$d['SubjectUserName']
+            if ($actor -match '\$$') { return $null }   # реплікація між DC (компʼютерні облікові записи) — штатна
+            $sev = 'Критично'; $note = ''
+            if ($actor -match '^(?i)(MSOL_|AAD_|Sync_)') { $sev = 'Високо'; $note = ' — ймовірно Azure AD Connect / Entra Connect, перевірте' }
+            $row = @{ Technique = 'DCSync (права реплікації від не-DC)'; Severity = $sev; Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $actor); Target = [string]$d['ObjectName']
+                      Details = (($hit -join ', ') + $note) }
+        }
+        { $_ -in 4728, 4732, 4756, 4729, 4733, 4757 } {
+            $gs = [string]$d['TargetSid']
+            if ($gs -notmatch $AdPrivGroupRx -and [string]$d['TargetUserName'] -ne 'DnsAdmins') { return $null }
+            $add = ($Id -in 4728, 4732, 4756)
+            $member = [string]$d['MemberName']; if (-not $member -or $member -eq '-') { $member = [string]$d['MemberSid'] }
+            $row = @{ Technique = $(if ($add) { 'Додано до привілейованої групи' } else { 'Видалено з привілейованої групи' }); Severity = $(if ($add) { 'Високо' } else { 'Середньо' })
+                      Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); Target = ("{0} → {1}" -f $member, $d['TargetUserName']); Details = "SID групи $gs" }
+        }
+        { $_ -in 4738, 4742 } {
+            $uac = [string]$d['UserAccountControl']
+            $hits = @($AdUacCodes.Keys | Where-Object { $uac.Contains($_) })
+            if (-not $hits.Count) { return $null }
+            $sev = 'Середньо'; if (@($hits | Where-Object { $AdUacCodes[$_][0] -eq 'Високо' }).Count) { $sev = 'Високо' }
+            $row = @{ Technique = 'Небезпечна зміна userAccountControl'; Severity = $sev; Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); Target = [string]$d['TargetUserName']
+                      Details = ((@($hits | ForEach-Object { $AdUacCodes[$_][1] })) -join '; ') }
+        }
+        5136 {
+            $attr = [string]$d['AttributeLDAPDisplayName']; $obj = [string]$d['ObjectDN']; $cls = [string]$d['ObjectClass']
+            if ([string]$d['OperationType'] -ne '%%14674') { return $null }   # цікавить лише додане значення
+            $t = ''; $sev = 'Високо'
+            switch ($attr) {
+                'msDS-KeyCredentialLink' { $t = 'Shadow Credentials (msDS-KeyCredentialLink)' }
+                'msDS-AllowedToActOnBehalfOfOtherIdentity' { $t = 'Resource-based constrained delegation (RBCD)' }
+                'gPCFileSysPath' { $t = 'Зміна шляху файлів GPO (перехоплення GPO)' }
+                'servicePrincipalName' { if ($cls -eq 'user') { $t = 'SPN додано користувачу (targeted Kerberoasting)'; $sev = 'Середньо' } }
+                'nTSecurityDescriptor' {
+                    if ($obj -match '^(?i)CN=AdminSDHolder,') { $t = 'Змінено ACL AdminSDHolder (персистентність)' }
+                    elseif ($DomainDN -and $obj -eq $DomainDN) { $t = 'Змінено ACL кореня домену (можлива видача прав DCSync)' }
+                }
+            }
+            if (-not $t) { return $null }
+            $val = [string]$d['AttributeValue']; if ($val.Length -gt 200) { $val = $val.Substring(0, 200) + '…' }
+            $row = @{ Technique = $t; Severity = $sev; Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); Target = $obj; Details = ("{0} = {1}" -f $attr, $val) }
+        }
+        default { return $null }
+    }
+    if (-not $row) { return $null }
+    $row['SourceIP'] = $(if ($ip -and $ip -ne '-') { $ip } else { '' })
+    return $row
+}
+
+if ($D.IsDC) {
+    Invoke-Step "3.10 Active Directory: ознаки атак (Kerberoasting, AS-REP, spraying, DCSync, привілейовані групи, ACL/делегування)" {
+        # ── Покриття аудиту ──
+        $need = @(
+            @{ N = 'Kerberos Service Ticket Operations'; G = '{0CCE9240-69AE-11D9-BED3-505054503030}'; R = 3; For = '4769 (Kerberoasting)' },
+            @{ N = 'Kerberos Authentication Service'; G = '{0CCE9242-69AE-11D9-BED3-505054503030}'; R = 3; For = '4768 / 4771 (AS-REP, spraying)' },
+            @{ N = 'Directory Service Access'; G = '{0CCE923B-69AE-11D9-BED3-505054503030}'; R = 1; For = '4662 (DCSync) — також потрібен SACL на корені домену' },
+            @{ N = 'Directory Service Changes'; G = '{0CCE923C-69AE-11D9-BED3-505054503030}'; R = 1; For = '5136 (ACL, RBCD, Shadow Credentials, GPO)' },
+            @{ N = 'Security Group Management'; G = '{0CCE9237-69AE-11D9-BED3-505054503030}'; R = 1; For = '4728 / 4732 / 4756' },
+            @{ N = 'User Account Management'; G = '{0CCE9235-69AE-11D9-BED3-505054503030}'; R = 1; For = '4738 (userAccountControl)' },
+            @{ N = 'Computer Account Management'; G = '{0CCE9236-69AE-11D9-BED3-505054503030}'; R = 1; For = '4742 (делегування компʼютерів)' }
+        )
+        $bits = @{ 0 = 'Немає аудиту'; 1 = 'Успіх'; 2 = 'Відмова'; 3 = 'Успіх і відмова' }
+        $aud = New-Object System.Collections.Generic.List[object]
+        foreach ($sb in $need) {
+            $v = $null; $cur = 'не вдалося прочитати'
+            try {
+                $csv = @(& auditpol /get /subcategory:"$($sb.G)" /r 2>$null | Where-Object { $_ } | ConvertFrom-Csv)
+                if ($csv.Count -and $csv[0].PSObject.Properties.Name -contains 'Setting Value') { $v = [int]$csv[0].'Setting Value' }
+                elseif ($csv.Count) {
+                    $txt = [string]$csv[0].'Inclusion Setting'; $v = 0
+                    if ($txt -match '(?i)success|успех|успіх') { $v = $v -bor 1 }
+                    if ($txt -match '(?i)failure|сбой|збій|отказ|відмов|невдач') { $v = $v -bor 2 }
+                }
+                if ($null -ne $v) { $cur = $bits[$v] }
+            } catch {}
+            $ok = $(if ($null -eq $v) { $null } else { (($v -band $sb.R) -eq $sb.R) })
+            $aud.Add([pscustomobject]@{ Subcategory = $sb.N; Current = $cur; Needed = $bits[$sb.R]; OK = $ok; Detects = $sb.For
+                Consequence = $(if ($ok -eq $false) { 'НЕ аудитується → відсутність подій нічого не доводить' } else { '' })
+                Fix = $(if ($ok -eq $false) { ('auditpol /set /subcategory:"{0}"{1}{2}' -f $sb.G, $(if ($sb.R -band 1) { ' /success:enable' } else { '' }), $(if ($sb.R -band 2) { ' /failure:enable' } else { '' })) } else { '' }) })
+        }
+        $D.AdAudit = Arr $aud
+        foreach ($a in @($aud | Where-Object { $_.OK -eq $false })) { Add-Note ("AD: підкатегорія аудиту «{0}» не ввімкнена — {1} не фіксуються, їх відсутність не доводить відсутність атаки." -f $a.Subcategory, $a.Detects) }
+
+        # ── Події (XPath-фільтри) ──
+        $sU = $Since.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z'); $uU = $Until.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z')
+        $T = "TimeCreated[@SystemTime>='$sU' and @SystemTime<='$uU']"
+        $queries = @(
+            @{ L = '4769 RC4/DES-квитки'; X = "*[System[(EventID=4769) and $T]] and *[EventData[(Data[@Name='TicketEncryptionType']='0x17' or Data[@Name='TicketEncryptionType']='0x18' or Data[@Name='TicketEncryptionType']='0x1' or Data[@Name='TicketEncryptionType']='0x3') and Data[@Name='Status']='0x0']]" },
+            @{ L = '4768 без preauth'; X = "*[System[(EventID=4768) and $T]] and *[EventData[Data[@Name='PreAuthType']='0' and Data[@Name='Status']='0x0']]" },
+            @{ L = '4771 невдала preauth'; X = "*[System[(EventID=4771) and $T]] and *[EventData[Data[@Name='Status']='0x18']]" },
+            @{ L = '4662 Control Access'; X = "*[System[(EventID=4662) and $T]] and *[EventData[Data[@Name='AccessMask']='0x100']]" },
+            @{ L = 'зміни груп'; X = "*[System[(EventID=4728 or EventID=4732 or EventID=4756 or EventID=4729 or EventID=4733 or EventID=4757) and $T]]" },
+            @{ L = '4738/4742 userAccountControl'; X = "*[System[(EventID=4738 or EventID=4742) and $T]]" },
+            @{ L = '5136 чутливі атрибути'; X = "*[System[(EventID=5136) and $T]] and *[EventData[Data[@Name='AttributeLDAPDisplayName']='msDS-KeyCredentialLink' or Data[@Name='AttributeLDAPDisplayName']='msDS-AllowedToActOnBehalfOfOtherIdentity' or Data[@Name='AttributeLDAPDisplayName']='gPCFileSysPath' or Data[@Name='AttributeLDAPDisplayName']='servicePrincipalName' or Data[@Name='AttributeLDAPDisplayName']='nTSecurityDescriptor']]" }
+        )
+        $domDN = [string]$D.AdDomainDN
+        if (-not $domDN -and $env:USERDNSDOMAIN) { $domDN = ((@($env:USERDNSDOMAIN.Split('.') | ForEach-Object { "DC=$_" })) -join ',') }
+        $ev = New-Object System.Collections.Generic.List[object]
+        foreach ($q in $queries) {
+            foreach ($e in (Get-EvXPath 'Security' $q.X $q.L)) {
+                $r = Get-AdAttackRow ([int]$e.Id) (Get-EvData $e) $domDN
+                if (-not $r) { continue }
+                $ev.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Technique = $r.Technique; Severity = $r.Severity
+                    Actor = $r.Actor; Target = $r.Target; SourceIP = $r.SourceIP; Details = $r.Details })
+            }
+        }
+        $D.AdEvents = Arr ($ev | Sort-Object TimeUtc)
+        Save-Csv $D.AdEvents '03_eventlogs\ad_attack_events.csv'
+
+        # ── Зведення (підказки для аналітика) ──
+        $fnd = New-Object System.Collections.Generic.List[object]
+        foreach ($g in @($D.AdEvents | Where-Object { $_.EventId -eq 4769 } | Group-Object Actor, SourceIP)) {
+            $svcs = @($g.Group | ForEach-Object { $_.Target } | Select-Object -Unique)
+            $first = $g.Group[0]; $last = $g.Group[$g.Count - 1]
+            $sev = $(if ($svcs.Count -ge 5) { 'Високо' } else { 'Середньо' })
+            $fnd.Add([pscustomobject]@{ Severity = $sev; Technique = $(if ($svcs.Count -ge 5) { 'Ймовірний Kerberoasting' } else { 'RC4/DES-квитки на сервісні облікові записи' })
+                Who = ("{0} з {1}" -f $first.Actor, $first.SourceIP); Count = $g.Count
+                Evidence = ("{0} різних SPN: {1}; {2} → {3}" -f $svcs.Count, (($svcs | Select-Object -First 8) -join ', '), $first.TimeLocal, $last.TimeLocal) })
+        }
+        foreach ($g in @($D.AdEvents | Where-Object { $_.EventId -eq 4768 } | Group-Object Target, SourceIP)) {
+            $fnd.Add([pscustomobject]@{ Severity = 'Високо'; Technique = 'AS-REP roasting'; Who = ("{0} (запит з {1})" -f $g.Group[0].Target, $g.Group[0].SourceIP); Count = $g.Count
+                Evidence = ("{0} → {1}" -f $g.Group[0].TimeLocal, $g.Group[$g.Count - 1].TimeLocal) })
+        }
+        foreach ($g in @($D.AdEvents | Where-Object { $_.EventId -eq 4771 -and $_.SourceIP } | Group-Object SourceIP)) {
+            $accs = @($g.Group | ForEach-Object { $_.Target } | Select-Object -Unique)
+            if ($accs.Count -ge 10) { $fnd.Add([pscustomobject]@{ Severity = 'Високо'; Technique = 'Password spraying (Kerberos)'; Who = $g.Name; Count = $g.Count
+                Evidence = ("{0} різних облікових записів: {1}…; {2} → {3}" -f $accs.Count, (($accs | Select-Object -First 8) -join ', '), $g.Group[0].TimeLocal, $g.Group[$g.Count - 1].TimeLocal) }) }
+        }
+        foreach ($g in @($D.AdEvents | Where-Object { $_.EventId -eq 4771 } | Group-Object Target)) {
+            if ($g.Count -ge 10) { $fnd.Add([pscustomobject]@{ Severity = 'Середньо'; Technique = 'Підбір пароля (Kerberos)'; Who = $g.Name; Count = $g.Count
+                Evidence = ("джерела: {0}; {1} → {2}" -f ((@($g.Group | ForEach-Object { $_.SourceIP } | Select-Object -Unique) | Select-Object -First 8) -join ', '), $g.Group[0].TimeLocal, $g.Group[$g.Count - 1].TimeLocal) }) }
+        }
+        foreach ($e in @($D.AdEvents | Where-Object { $_.EventId -notin 4769, 4768, 4771 })) {
+            $fnd.Add([pscustomobject]@{ Severity = $e.Severity; Technique = $e.Technique; Who = $e.Actor; Count = 1; Evidence = ("{0}; {1}; {2}" -f $e.TimeLocal, $e.Target, $e.Details) })
+        }
+        $D.AdFindings = Arr $fnd
+        Save-Csv $D.AdFindings '03_eventlogs\ad_attack_findings.csv'
+        Save-Csv $D.AdAudit '03_eventlogs\ad_audit_coverage.csv'
+    }
 }
 
 # ════════════════════════════════════ 3.9 ОРИГІНАЛЬНІ ЖУРНАЛИ (.evtx) ════════════════════════════════════
@@ -2143,6 +2428,14 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     foreach ($h in @($D.Hardening | Where-Object { $_.Status -eq 'Ризик' -and $_.Severity -in 'Високо', 'Середньо' })) {
         Add-Flag $h.Severity 'Конфігурація' ("{0}: {1}" -f $h.Check, $h.Current) ("Рекомендовано: {0}. {1}. Виправлення: {2}" -f $h.Recommended, $h.Why, $h.Fix) 'hardening'
     }
+    foreach ($h in @($D.AdConfig | Where-Object { $_.Status -eq 'Ризик' -and $_.Severity -in 'Високо', 'Середньо' })) {
+        Add-Flag $h.Severity 'Active Directory' ("{0}: {1}" -f $h.Check, $h.Current) ("Рекомендовано: {0}. {1}. Виправлення: {2}" -f $h.Recommended, $h.Why, $h.Fix) 'ad'
+    }
+    foreach ($f in @($D.AdFindings | Where-Object { $_.Severity -in 'Критично', 'Високо', 'Середньо' })) {
+        Add-Flag $f.Severity 'Active Directory' ("{0}: {1}" -f $f.Technique, $f.Who) ("{0} под.; {1}" -f $f.Count, $f.Evidence) 'ad'
+    }
+    $adGap = @($D.AdAudit | Where-Object { $_.OK -eq $false })
+    if ($adGap.Count) { Add-Flag 'Середньо' 'Active Directory' ("Аудит AD неповний: {0} підкатегор." -f $adGap.Count) ((@($adGap | ForEach-Object { "{0} ({1})" -f $_.Subcategory, $_.Detects }) -join '; ') + ' — відсутність подій не доводить відсутність атаки') 'ad' }
     $badAud = @($D.AuditSettings | Where-Object { $_.OK -eq $false })
     if ($badAud.Count) { Add-Flag 'Середньо' 'Аудит' ("Налаштування аудиту нижче рекомендованих: {0}" -f $badAud.Count) ((@($badAud | ForEach-Object { $_.Setting }) -join '; ')) 'system' }
     if ($D.PrefetchState -like '0*') { Add-Flag 'Інфо' 'Методологія' 'Prefetch вимкнено' 'Відсутність .pf — очікувана, не доказ відсутності запуску' 'integrity' }
@@ -2166,6 +2459,7 @@ Invoke-Step "7.1 Єдиний timeline з усіх джерел" {
     foreach ($r in @($D.Exec)) { $m = ''; if ($r.Reason -match 'IOC|Підозрілі') { $m = 'bad' }; Add-TL $r.TimeUtc $r.Source 'Запуск' ("{0}  ← {1}" -f $r.CommandLine, $r.Parent) $r.User $m }
     foreach ($r in @($D.SysmonMisc)) { Add-TL $r.TimeUtc 'Sysmon' $r.EventId ("{0}: {1} ({2})" -f $r.Reason, $r.Target, $r.Image) $r.User 'warn' }
     foreach ($r in @($D.Ps4104)) { Add-TL $r.TimeUtc 'PowerShell' '4104' $r.Snippet '' 'warn' }
+    foreach ($r in @($D.AdEvents | Where-Object { $_.Severity -ne 'Інфо' })) { Add-TL $r.TimeUtc 'Active Directory' ([string]$r.EventId) ("{0}: {1} {2} {3}" -f $r.Technique, $r.Target, $r.SourceIP, $r.Details) $r.Actor $(if ($r.Severity -in 'Критично', 'Високо') { 'bad' } else { 'warn' }) }
     foreach ($f in @(@($D.KnownFiles) + @($D.WideHigh) | Where-Object { $_.Exists })) {
         Add-TL $f.CreatedUtc 'Файл' 'Created' ("Створено: {0}" -f $f.Path) '' 'warn'
         if ($f.ModifiedUtc -and $f.ModifiedUtc -ne $f.CreatedUtc) { Add-TL $f.ModifiedUtc 'Файл' 'Modified' ("Змінено (може бути успадковано з архіву): {0}" -f $f.Path) '' '' }
@@ -2322,6 +2616,18 @@ Invoke-Step "8. Формування HTML-звіту" {
          (H3 'Успішні входи користувачів (4624, типи 2/3/7/10/11)') + (HT $D.Ev4624 -Csv '03_eventlogs\security_4624_user_logons.csv' -RowClass { param($r) if ($r.LogonType -like '10*') { 'info' } }) +
          (H3 'Невдалі входи (4625) — сирі події') + (HT $D.Ev4625 -Csv '03_eventlogs\security_4625_failed_logons.csv')
     [void]$S.Append((Sec 'auth' '5. Автентифікація / brute-force' $b -Count @($D.Ev4625).Count))
+    $rcSev = { param($r) if ($r.Severity -in 'Критично', 'Високо') { 'bad' } elseif ($r.Severity -eq 'Середньо') { 'warn' } }
+    if ($D.IsDC) {
+        $b = (H3 'Покриття аудиту для виявлення атак на AD' 'Якщо підкатегорія не аудитується — відповідних подій не буде навіть під час атаки.') +
+             (HT $D.AdAudit -Csv '03_eventlogs\ad_audit_coverage.csv' -RowClass { param($r) if ($r.OK -eq $false) { 'bad' } elseif ($r.OK -eq $true) { 'good' } }) +
+             (H3 'Ознаки атак (зведення)' 'Kerberoasting, AS-REP roasting, password spraying, DCSync, привілейовані групи, userAccountControl, ACL/RBCD/Shadow Credentials/GPO.') +
+             (HT $D.AdFindings -Csv '03_eventlogs\ad_attack_findings.csv' -RowClass $rcSev -Empty 'Ознак атак на AD за вікно не знайдено (див. покриття аудиту вище).') +
+             (H3 'Події-докази') + (HT $D.AdEvents -Csv '03_eventlogs\ad_attack_events.csv' -RowClass $rcSev -Empty 'Подій немає.') +
+             (H3 'Конфігурація домену' 'LDAP, лише читання. Колонка Fix — що зробити; Why — чим це загрожує.') +
+             (HT $D.AdConfig -Cols @('Status', 'Severity', 'Check', 'Current', 'Recommended', 'Fix', 'Why') -Csv '02_system\ad_config.csv' -RowClass { param($r) if ($r.Status -eq 'Ризик' -and $r.Severity -eq 'Високо') { 'bad' } elseif ($r.Status -eq 'Ризик') { 'warn' } elseif ($r.Status -eq 'OK') { 'good' } }) +
+             (H3 'Ризикові та привілейовані облікові записи') + (HT $D.AdObjects -Csv '02_system\ad_risky_accounts.csv' -Empty 'Немає.')
+    } else { $b = "<p class='empty'>Хост не є контролером домену — аудит Active Directory не виконувався.</p>" }
+    [void]$S.Append((Sec 'ad' '5.1 Active Directory' $b -Count (@($D.AdFindings | Where-Object { $_.Severity -in 'Критично', 'Високо' }).Count + @($D.AdConfig | Where-Object { $_.Status -eq 'Ризик' }).Count)))
 
     $b = (H3 'Зведення за IP-джерелом') + (HT $D.RdpSummary -RowClass $rcIoc -Csv '03_eventlogs\rdp_by_source.csv') + (H3 'RDP-події') + (HT $D.Rdp -Csv '03_eventlogs\rdp_events.csv' -RowClass { param($r) if ($r.EventId -eq 140) { 'warn' } })
     [void]$S.Append((Sec 'rdp' '6. RDP' $b -Count @($D.Rdp).Count))
@@ -2415,7 +2721,7 @@ function flt(inp,id){var q=inp.value.toLowerCase();var rows=document.getElementB
 function srt(th){var t=th.closest('table'),i=Array.prototype.indexOf.call(th.parentNode.children,th),b=t.tBodies[0],r=Array.prototype.slice.call(b.rows);var d=th.getAttribute('data-d')==='a'?'d':'a';th.setAttribute('data-d',d);
 r.sort(function(x,y){var a=x.cells[i].innerText,c=y.cells[i].innerText,na=parseFloat(a),nc=parseFloat(c);var v=(/^-?[\d.]+$/.test(a)&&/^-?[\d.]+$/.test(c))?na-nc:a.localeCompare(c);return d==='a'?v:-v;});r.forEach(function(x){b.appendChild(x);});}
 '@
-    $navItems = @(@('summary', 'Огляд і прапорці'), @('integrity', 'Цілісність / NIST'), @('volatile', 'Волатильні дані'), @('system', 'Система'), @('hardening', 'Налаштування безпеки'), @('auth', 'Автентифікація'),
+    $navItems = @(@('summary', 'Огляд і прапорці'), @('integrity', 'Цілісність / NIST'), @('volatile', 'Волатильні дані'), @('system', 'Система'), @('hardening', 'Налаштування безпеки'), @('auth', 'Автентифікація'), @('ad', 'Active Directory'),
                   @('rdp', 'RDP'), @('services', 'Служби'), @('tasks', 'Задачі'), @('persist', 'Персистентність'), @('firewall', 'Firewall'), @('defender', 'Defender'),
                   @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
     $nav = (@($navItems | ForEach-Object { "<a href='#$($_[0])'>$(E $_[1])</a>" }) -join '')

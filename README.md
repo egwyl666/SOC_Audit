@@ -7,7 +7,7 @@
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207.x-5391FE?logo=powershell&logoColor=white)](#1-requirements)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011%20%7C%20Server%202016--2025-0078D6?logo=windows&logoColor=white)](#1-requirements)
 [![NIST SP 800-86](https://img.shields.io/badge/NIST-SP%20800--86-2E7D32)](https://csrc.nist.gov/pubs/sp/800/86/final)
-[![Version](https://img.shields.io/badge/version-1.3-informational)](soc-collect.ps1)
+[![Version](https://img.shields.io/badge/version-1.4-informational)](soc-collect.ps1)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#1-requirements)
 
 **🇬🇧 English** · [🇺🇦 Українська](README.uk.md)
@@ -16,7 +16,7 @@
 
 ---
 
-`soc-collect.ps1` — **SOC Live Response Collector v1.3**. It replaces the old main audit + `fwlog.ps1` +
+`soc-collect.ps1` — **SOC Live Response Collector v1.4**. It replaces the old main audit + `fwlog.ps1` +
 `filesinter.ps1` with one file: it collects volatile data, persistence, event logs, `pfirewall.log` and file
 artifacts, correlates them, and builds a timeline and a self-contained HTML report — with chain of custody and
 a SHA256 manifest. Order of collection and handling principles follow **NIST SP 800-86**.
@@ -95,7 +95,8 @@ Then open `C:\SOC_Evidence\<CaseId>_<HOST>_<timestamp>Z\report.html` in a browse
 > Tested: v1.0 — full run on Windows 11 / PowerShell 5.1.26100, **34/34 steps without errors**.
 > v1.1 — full run on a domain controller (Windows Server, PS 5.1), 64- and 32-bit: 35/35 steps OK; its findings drove the fixes in v1.2.
 > v1.2 — re-run on the same DC (64-bit and auto-relaunched 32-bit): all steps OK, fixes confirmed.
-> v1.3 adds new steps (security configuration audit, `.evtx` export); parser check and unit tests passed, Windows run pending — see [CHANGELOG](CHANGELOG.md).
+> v1.3 — DC run OK (security configuration audit, 19 logs exported).
+> v1.4 adds Active Directory steps (DC only); parser check and unit tests passed, Windows run pending — see [CHANGELOG](CHANGELOG.md).
 
 > [!TIP]
 > Get the script via **Download raw file** or `git clone` — the repository stores it byte-for-byte
@@ -272,8 +273,8 @@ flowchart LR
 |---|---|
 | **0. Pre-flight** | Script SHA256, time/timezone/NTP, NTFS last-access, Prefetch, user profiles |
 | **1. Volatile** | Fast snapshot first (TCP/UDP → processes), then ARP/NDP, DNS cache, IP/routes, SMB; only after that — owner/hash/signature enrichment and sessions |
-| **2. System** | Accounts, admins, policies, services, scheduled tasks (author from XML), autoruns, WMI, Defender, licensing/KMS, firewall, **event logs (size/depth/coverage) and audit policy**  **Security configuration audit** (SMBv1/signing, LLMNR/NetBIOS, WDigest, LSA PPL, Credential Guard, NTLM/LM, UAC, RDP NLA, PowerShell v2, BitLocker, ASR, LAPS, Guest, Spooler on DC, firewall profiles, last update) |
-| **3. Logs for the window** | 4625/4624/4648/4740/4776, account changes, log clearing, RDP (1149, 21–25, 131, 140), services (7045/4697/7040), tasks (4698–4702, TaskScheduler), firewall changes (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC executions (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 ; **full export of original `.evtx`** with SHA256 |
+| **2. System** | Accounts, admins, policies, services, scheduled tasks (author from XML), autoruns, WMI, Defender, licensing/KMS, firewall, **event logs (size/depth/coverage) and audit policy**  **Security configuration audit** (SMBv1/signing, LLMNR/NetBIOS, WDigest, LSA PPL, Credential Guard, NTLM/LM, UAC, RDP NLA, PowerShell v2, BitLocker, ASR, LAPS, Guest, Spooler on DC, firewall profiles, last update) ; **on a DC: AD configuration** via LDAP (kerberoastable / AS-REP-roastable accounts, unconstrained delegation, krbtgt age, privileged account flags, MachineAccountQuota, password/lockout policy, privileged group members) |
+| **3. Logs for the window** | 4625/4624/4648/4740/4776, account changes, log clearing, RDP (1149, 21–25, 131, 140), services (7045/4697/7040), tasks (4698–4702, TaskScheduler), firewall changes (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC executions (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 ; **full export of original `.evtx`** with SHA256 ; **on a DC: AD attack signs** — Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), privileged groups, userAccountControl, ACL/RBCD/Shadow Credentials/GPO (5136), with audit-coverage check |
 | **4. pfirewall.log** | Summary by port and source, ALLOW/DROP, first/last, heuristics (ICMP recon, RDP/SMB, scanning), IOC IPs |
 | **5. File artifacts** | Known paths, mask search, LNK (with target), BAM/DAM, Prefetch, Recycle Bin ($I), Zone.Identifier, copies of browser history / Windows Timeline / PS history with hint search |
 | **6. Analysis** | Brute-force summary, 4625 ↔ firewall ↔ RDP correlation, IOC matches, automatic flags |
@@ -299,6 +300,8 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── 01_volatile\  02_system\  03_eventlogs\  04_firewall\  05_artifacts\
 ├── 02_system\security_config_audit.csv  ← security settings audit
 ├── 03_eventlogs\evtx\                  ← original logs (.evtx) + evtx_export.csv
+├── 02_system\ad_config.csv, ad_risky_accounts.csv          ← AD configuration (DC only)
+├── 03_eventlogs\ad_attack_findings.csv / _events.csv / ad_audit_coverage.csv ← AD attack signs (DC only)
 └── 06_evidence_copies\          ← verified copies (browsers, pfirewall.log, hives)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
 ```
@@ -308,7 +311,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 ### 📊 HTML report
 
-- Sidebar navigation — 18 sections, incl. **4.1 Security settings** (current / recommended / fix / why) and the `.evtx` export table
+- Sidebar navigation — 19 sections (incl. **5.1 Active Directory** on a DC), incl. **4.1 Security settings** (current / recommended / fix / why) and the `.evtx` export table
 - Counter cards and a flag table with severity (Critical / High / Medium / Info)
 - Every table has a **filter** (search box) and **sorting** (click a header)
 - Highlighting: 🟥 IOC / critical, 🟧 suspicious, 🟩 VERIFIED / OK
@@ -327,7 +330,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 | Encoding | UTF-8 with BOM — 5.1 reads Cyrillic correctly |
 | Modules | Built-in only: NetSecurity, NetTCPIP, ScheduledTasks, Defender, LocalAccounts, CimCmdlets |
 | OS localization | Event data is read from XML (not localized text); `auditpol` parsing supports EN/RU/UA |
-| Tested | v1.0: Windows 11 + PS 5.1.26100, 34/34 OK; v1.1: domain controller, PS 5.1 64/32-bit, 35/35 OK; v1.2: DC re-run OK; v1.3: parser + unit tests, Windows run pending |
+| Tested | v1.0: Windows 11 + PS 5.1.26100, 34/34 OK; v1.1: domain controller, PS 5.1 64/32-bit, 35/35 OK; v1.2: DC re-run OK; v1.3: DC OK; v1.4: parser + unit tests, Windows run pending |
 
 ---
 
