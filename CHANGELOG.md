@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.5.0] — 2026-09-25
+
+First step of the road to 2.0: automated checks on real Windows. The collector's behaviour is unchanged.
+
+### Added
+- `tests/run-tests.ps1` — 139 unit tests without external modules (functions are taken from the script via AST, the
+  script itself is not run): IOC IP boundaries, `\Microsoft\` task heuristics, bare-exe resolution, hashing of files open
+  for writing, chunked string search, `auditpol` parsing (EN/RU/UA, 6 and 7 columns), FILETIME, AD attack signs,
+  default-IOC flag lowering, function names vs built-in aliases, step 2.9 run for a workstation and a DC.
+- `tests/check-encoding.ps1` — all `*.ps1` must be UTF-8 with BOM and CRLF.
+- `tests/smoke.ps1` — full collection in a separate process; fails on a non-zero exit code, missing report/manifest
+  or any step with status `ПОМИЛКА`.
+- `.github/workflows/ci.yml` — on every push / PR on `windows-latest`: encoding, PSScriptAnalyzer (errors + PS 5.1
+  syntax), unit tests in Windows PowerShell 5.1 and PowerShell 7, smoke run, report uploaded as an artifact.
+
+### Fixed
+- Default-IOC detection copies `$PSBoundParameters` into a variable before `Where-Object`, so it does not depend on
+  how the script block scope resolves automatic variables.
+
+## [1.4.4] — 2026-09-25
+
+### Changed
+- When none of `-NamePatterns` / `-IocSha256` / `-IocIPs` / `-KnownPaths` is passed, the test KMSAuto IOCs are used:
+  a yellow console warning, a collection note and a report banner say so, and flags whose only basis is a file-name
+  mask match are lowered from Medium to Info and marked "[тестова маска]". IOC hash / IOC IP flags are not affected;
+  with case IOCs everything works as before. (On the DC run 29 of 55 Medium flags were such mask noise.)
+- Wording of the note about a disabled AD audit subcategory.
+
 ## [1.4.3] — 2026-09-25
 
 ### Added
