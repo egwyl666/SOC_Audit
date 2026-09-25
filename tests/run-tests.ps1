@@ -193,6 +193,18 @@ try {
         Assert-True 'Get-EventIdCount24h: неіснуючий канал -> null' ($null -eq (Get-EventIdCount24h 'SOC-Collect-No-Such/Log' @(1) $now))
     }
 
+    Test-Group 'Кроки не перезаписують $D (імена змінних без урахування регістру)'
+    $stepAsts = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].CommandElements.Count -ge 3 -and $args[0].CommandElements[0].Extent.Text -eq 'Invoke-Step' }, $true))
+    $bad = @()
+    foreach ($st in $stepAsts) {
+        $sbAst = $st.CommandElements[2]
+        $hits = @($sbAst.FindAll({ param($x)
+            ($x -is [System.Management.Automation.Language.ForEachStatementAst] -and $x.Variable.VariablePath.UserPath -ieq 'D') -or
+            ($x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.Left.VariablePath.UserPath -ieq 'D') }, $true))
+        foreach ($h in $hits) { $bad += ("{0}: рядок {1}" -f $st.CommandElements[1].Extent.Text, $h.Extent.StartLineNumber) }
+    }
+    Assert-True ("жоден крок не присвоює `$d/`$D ({0})" -f ($bad -join '; ')) ($bad.Count -eq 0)
+
     Test-Group 'Вердикт персистентності (Get-PersistVerdict)'
     Assert-True 'підпис Microsoft = штатно'        ((Get-PersistVerdict $true 'Valid' 'Microsoft Windows' 'Системний').Status -eq 'Штатно')
     Assert-True 'сторонній підпис = Інфо'          ((Get-PersistVerdict $true 'Valid' 'Google LLC' 'Program Files').Severity -eq 'Інфо')

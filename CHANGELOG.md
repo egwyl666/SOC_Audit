@@ -17,6 +17,13 @@ Extended persistence.
   Високо / Середньо rows become flags.
 - Tests for the verdict logic; the smoke run checks `persistence_extended.csv`.
 
+### Fixed
+- **Event-log steps 3.1–3.10 lost their results for the report.** Inside these steps the per-event variable `$d`
+  shadowed the global data store `$D` (PowerShell variable names are case-insensitive). After the first parsed event,
+  every `$D.X = …` in that step went into the local variable: the CSV files were written correctly, but the report,
+  brute-force summary, correlation and flags saw empty data. Present since the original version; renamed to `$evd`.
+- New unit test: no `Invoke-Step` block may assign or loop over a variable named `$d` / `$D`.
+
 ## [1.8.0] — 2026-09-25
 
 Safe defaults.

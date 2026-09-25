@@ -1885,7 +1885,7 @@ Invoke-Step "2.12 Розширена персистентність: LSA, AppIni
         if (-not $p) { return '' }
         if (-not ($p.Contains('\') -or $p.Contains('/'))) {
             if (-not [IO.Path]::GetExtension($p)) { $p += $DefaultExt }
-            foreach ($d in @($sys32, $env:SystemRoot, (Join-Path $sys32 'drivers'))) { $c = Join-Path $d $p; if (Test-Path -LiteralPath $c -PathType Leaf) { return $c } }
+            foreach ($dir in @($sys32, $env:SystemRoot, (Join-Path $sys32 'drivers'))) { $c = Join-Path $dir $p; if (Test-Path -LiteralPath $c -PathType Leaf) { return $c } }
             return (Join-Path $sys32 $p)
         }
         return $p
@@ -1926,7 +1926,7 @@ Invoke-Step "2.12 Розширена персистентність: LSA, AppIni
     foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Windows') {
         $dlls = [string](Get-RegVal $k 'AppInit_DLLs'); $load = Get-RegVal $k 'LoadAppInit_DLLs'
         if ($dlls.Trim()) {
-            foreach ($d in @($dlls -split '[,\s]+' | Where-Object { $_ })) { Add-PRow 'AppInit_DLLs' ($k -replace '^HKLM:\\', 'HKLM\') 'AppInit_DLLs' ("{0} (LoadAppInit_DLLs={1})" -f $d, $load) (Resolve-PersistPath $d) 'DLL завантажується в кожен процес з user32.dll (T1546.010)' }
+            foreach ($dll in @($dlls -split '[,\s]+' | Where-Object { $_ })) { Add-PRow 'AppInit_DLLs' ($k -replace '^HKLM:\\', 'HKLM\') 'AppInit_DLLs' ("{0} (LoadAppInit_DLLs={1})" -f $dll, $load) (Resolve-PersistPath $dll) 'DLL завантажується в кожен процес з user32.dll (T1546.010)' }
             if ($load -eq 1) { Add-VRow 'AppInit_DLLs' ($k -replace '^HKLM:\\', 'HKLM\') 'LoadAppInit_DLLs' '1' 'Увімкнено' 'Високо' 'AppInit_DLLs активні: DLL вище завантажуються в процеси' }
         }
     }
@@ -2004,15 +2004,15 @@ Invoke-Step "2.12 Розширена персистентність: LSA, AppIni
     }
 
     # ── Драйвери, що працюють: без дійсного підпису або поза System32\drivers (T1543.003 / rootkit) ──
-    foreach ($d in @(Get-CimInstance Win32_SystemDriver -Filter "State='Running'" -ErrorAction SilentlyContinue)) {
-        $p = [string]$d.PathName
+    foreach ($drv in @(Get-CimInstance Win32_SystemDriver -Filter "State='Running'" -ErrorAction SilentlyContinue)) {
+        $p = [string]$drv.PathName
         if (-not $p) { continue }
         $p = $p -replace '^\\\?\?\\', ''
         $p = Resolve-PersistPath $p '.sys'
         $bi = Get-BinInfo $p
         $inDrivers = $p.StartsWith((Join-Path $sys32 'drivers') + '\', [StringComparison]::OrdinalIgnoreCase) -or $p.StartsWith((Join-Path $sys32 'DriverStore') + '\', [StringComparison]::OrdinalIgnoreCase)
         if ($bi -and $bi.Exists -and $bi.Sig -eq 'Valid' -and $inDrivers) { continue }   # штатні драйвери не виводимо — їх сотні
-        Add-PRow 'Драйвер' 'Win32_SystemDriver (Running)' $d.Name ("{0}; {1}" -f $d.DisplayName, $d.StartMode) $p $(if ($inDrivers) { 'Драйвер ядра без дійсного підпису' } else { 'Драйвер ядра поза System32\drivers' })
+        Add-PRow 'Драйвер' 'Win32_SystemDriver (Running)' $drv.Name ("{0}; {1}" -f $drv.DisplayName, $drv.StartMode) $p $(if ($inDrivers) { 'Драйвер ядра без дійсного підпису' } else { 'Драйвер ядра поза System32\drivers' })
     }
 
     $D.PersistExt = Arr $rows
@@ -2022,15 +2022,15 @@ Invoke-Step "2.12 Розширена персистентність: LSA, AppIni
 # ════════════════════════════════════ 3. ЖУРНАЛИ ПОДІЙ ЗА ВІКНО ════════════════════════════════════
 Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776, зміни облікових записів, очищення журналів" {
     $rows = foreach ($e in (Get-Ev 'Security' @(4625))) {
-        $d = Get-EvData $e
+        $evd = Get-EvData $e
         [pscustomobject]@{
             TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 4625
-            TargetUser = $d['TargetUserName']; TargetDomain = $d['TargetDomainName']
-            LogonType = $d['LogonType']; LogonTypeText = (Get-LogonTypeText $d['LogonType'])
-            Status = (Get-StatusText $d['Status']); SubStatus = (Get-StatusText $d['SubStatus'])
-            SourceIP = $d['IpAddress']; SourcePort = $d['IpPort']; Workstation = $d['WorkstationName']
-            CallerProcess = $d['ProcessName']; LogonProcess = ([string]$d['LogonProcessName']).Trim(); AuthPackage = $d['AuthenticationPackageName']
-            Subject = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); RecordId = $e.RecordId
+            TargetUser = $evd['TargetUserName']; TargetDomain = $evd['TargetDomainName']
+            LogonType = $evd['LogonType']; LogonTypeText = (Get-LogonTypeText $evd['LogonType'])
+            Status = (Get-StatusText $evd['Status']); SubStatus = (Get-StatusText $evd['SubStatus'])
+            SourceIP = $evd['IpAddress']; SourcePort = $evd['IpPort']; Workstation = $evd['WorkstationName']
+            CallerProcess = $evd['ProcessName']; LogonProcess = ([string]$evd['LogonProcessName']).Trim(); AuthPackage = $evd['AuthenticationPackageName']
+            Subject = ("{0}\{1}" -f $evd['SubjectDomainName'], $evd['SubjectUserName']); RecordId = $e.RecordId
         }
     }
     $D.Ev4625 = Arr ($rows | Sort-Object TimeUtc)
@@ -2044,14 +2044,14 @@ Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776,
     $xpNet   = $xpBase + " and *[EventData[Data[@Name='LogonType']='3']]"
     $ev4624 = @(Get-EvXPath 'Security' $xpInter '4624 типи 2/7/10/11 — інтерактивні/RDP') + @(Get-EvXPath 'Security' $xpNet '4624 тип 3 — мережеві')
     $rows = foreach ($e in $ev4624) {
-        $d = Get-EvData $e
-        $sid = [string]$d['TargetUserSid']
-        if ($sid -notmatch '^S-1-5-21-|^S-1-12-' -or ([string]$d['TargetUserName']).EndsWith('$')) { continue }
+        $evd = Get-EvData $e
+        $sid = [string]$evd['TargetUserSid']
+        if ($sid -notmatch '^S-1-5-21-|^S-1-12-' -or ([string]$evd['TargetUserName']).EndsWith('$')) { continue }
         [pscustomobject]@{
             TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 4624
-            TargetUser = ("{0}\{1}" -f $d['TargetDomainName'], $d['TargetUserName']); LogonType = (Get-LogonTypeText $d['LogonType'])
-            SourceIP = $d['IpAddress']; Workstation = $d['WorkstationName']; LogonProcess = ([string]$d['LogonProcessName']).Trim()
-            AuthPackage = $d['AuthenticationPackageName']; LogonId = $d['TargetLogonId']; Elevated = $d['ElevatedToken']; CallerProcess = $d['ProcessName']
+            TargetUser = ("{0}\{1}" -f $evd['TargetDomainName'], $evd['TargetUserName']); LogonType = (Get-LogonTypeText $evd['LogonType'])
+            SourceIP = $evd['IpAddress']; Workstation = $evd['WorkstationName']; LogonProcess = ([string]$evd['LogonProcessName']).Trim()
+            AuthPackage = $evd['AuthenticationPackageName']; LogonId = $evd['TargetLogonId']; Elevated = $evd['ElevatedToken']; CallerProcess = $evd['ProcessName']
         }
     }
     $D.Ev4624 = Arr ($rows | Sort-Object TimeUtc)
@@ -2061,21 +2061,21 @@ Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776,
                   4720 = 'Створено обліковий запис'; 4722 = 'Обліковий запис увімкнено'; 4724 = 'Скидання пароля'; 4725 = 'Обліковий запис вимкнено'
                   4726 = 'Обліковий запис видалено'; 4732 = 'Додано до локальної групи'; 4733 = 'Видалено з локальної групи'; 4738 = 'Змінено обліковий запис' }
     $rows = foreach ($e in (Get-Ev 'Security' @(4648, 4740, 4776, 4720, 4722, 4724, 4725, 4726, 4732, 4733, 4738))) {
-        $d = Get-EvData $e
-        $target = $d['TargetUserName']; if (-not $target -and $d['MemberName']) { $target = $d['MemberName'] }; if (-not $target -and $d['MemberSid']) { $target = Resolve-Sid $d['MemberSid'] }
+        $evd = Get-EvData $e
+        $target = $evd['TargetUserName']; if (-not $target -and $evd['MemberName']) { $target = $evd['MemberName'] }; if (-not $target -and $evd['MemberSid']) { $target = Resolve-Sid $evd['MemberSid'] }
         [pscustomobject]@{
             TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Meaning = $meaning[[int]$e.Id]
-            Target = $target; Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']).Trim('\')
-            SourceIP = (Get-FirstIP @($d['IpAddress'])); Workstation = $(if ($d['Workstation']) { $d['Workstation'] } else { $d['TargetDomainName'] })
-            Status = (Get-StatusText $d['Status']); Details = (Format-EvData $d @('SubjectUserSid', 'SubjectLogonId', 'TargetUserSid', 'PrivilegeList'))
+            Target = $target; Actor = ("{0}\{1}" -f $evd['SubjectDomainName'], $evd['SubjectUserName']).Trim('\')
+            SourceIP = (Get-FirstIP @($evd['IpAddress'])); Workstation = $(if ($evd['Workstation']) { $evd['Workstation'] } else { $evd['TargetDomainName'] })
+            Status = (Get-StatusText $evd['Status']); Details = (Format-EvData $evd @('SubjectUserSid', 'SubjectLogonId', 'TargetUserSid', 'PrivilegeList'))
         }
     }
     $D.OtherAuth = Arr ($rows | Sort-Object TimeUtc)
     Save-Csv $D.OtherAuth '03_eventlogs\security_auth_other.csv'
 
     $rows = @()
-    foreach ($e in (Get-Ev 'Security' @(1102, 1100))) { $d = Get-EvData $e; $rows += [pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Log = 'Security'; Details = $(if ($e.Id -eq 1102) { 'Журнал Security ОЧИЩЕНО. ' } else { 'Служба журналювання зупинена. ' }) + (Format-EvData $d) } }
-    foreach ($e in (Get-Ev 'System' @(104))) { $d = Get-EvData $e; $rows += [pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 104; Log = 'System'; Details = 'Журнал ОЧИЩЕНО. ' + (Format-EvData $d) } }
+    foreach ($e in (Get-Ev 'Security' @(1102, 1100))) { $evd = Get-EvData $e; $rows += [pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Log = 'Security'; Details = $(if ($e.Id -eq 1102) { 'Журнал Security ОЧИЩЕНО. ' } else { 'Служба журналювання зупинена. ' }) + (Format-EvData $evd) } }
+    foreach ($e in (Get-Ev 'System' @(104))) { $evd = Get-EvData $e; $rows += [pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 104; Log = 'System'; Details = 'Журнал ОЧИЩЕНО. ' + (Format-EvData $evd) } }
     $D.LogCleared = Arr $rows
     Save-Csv $D.LogCleared '03_eventlogs\log_cleared.csv'
 }
@@ -2092,11 +2092,11 @@ Invoke-Step "3.2 RDP: 1149 (NLA), 21-25/39/40 (сесії), 131/140 (RdpCoreTS �
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($df in $defs) {
         foreach ($e in (Get-Ev $df.Log $df.Ids)) {
-            $d = Get-EvData $e
+            $evd = Get-EvData $e
             $user = ''
-            if ($e.Id -eq 1149) { $user = ("{0}\{1}" -f $d['Param2'], $d['Param1']).Trim('\') } elseif ($d['User']) { $user = $d['User'] }
-            $ip = Get-FirstIP @($d['Param3'], $d['Address'], $d['ClientIP'], $d['IPString'])
-            $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Log = $df.Short; Meaning = $mean[[int]$e.Id]; User = $user; SourceIP = $ip; Details = (Format-EvData $d) })
+            if ($e.Id -eq 1149) { $user = ("{0}\{1}" -f $evd['Param2'], $evd['Param1']).Trim('\') } elseif ($evd['User']) { $user = $evd['User'] }
+            $ip = Get-FirstIP @($evd['Param3'], $evd['Address'], $evd['ClientIP'], $evd['IPString'])
+            $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Log = $df.Short; Meaning = $mean[[int]$e.Id]; User = $user; SourceIP = $ip; Details = (Format-EvData $evd) })
         }
     }
     $D.Rdp = Arr ($rows | Sort-Object TimeUtc)
@@ -2116,17 +2116,17 @@ Invoke-Step "3.2 RDP: 1149 (NLA), 21-25/39/40 (сесії), 131/140 (RdpCoreTS �
 Invoke-Step "3.3 Служби: встановлення (7045 / 4697) і зміна типу запуску (7040)" {
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($e in (Get-Ev 'System' @(7045, 7040))) {
-        $d = Get-EvData $e
+        $evd = Get-EvData $e
         if ($e.Id -eq 7045) {
-            $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 7045; Source = 'System / SCM'; Service = $d['ServiceName']; Binary = $d['ImagePath']; StartType = $d['StartType']; Account = $d['AccountName']; InstalledBy = ''; LogonId = '' })
+            $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 7045; Source = 'System / SCM'; Service = $evd['ServiceName']; Binary = $evd['ImagePath']; StartType = $evd['StartType']; Account = $evd['AccountName']; InstalledBy = ''; LogonId = '' })
         } else {
-            $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 7040; Source = 'System / SCM'; Service = $d['param1']; Binary = ''; StartType = ("{0} → {1}" -f $d['param2'], $d['param3']); Account = ''; InstalledBy = ''; LogonId = '' })
+            $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 7040; Source = 'System / SCM'; Service = $evd['param1']; Binary = ''; StartType = ("{0} → {1}" -f $evd['param2'], $evd['param3']); Account = ''; InstalledBy = ''; LogonId = '' })
         }
     }
     foreach ($e in (Get-Ev 'Security' @(4697))) {
-        $d = Get-EvData $e
-        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 4697; Source = 'Security'; Service = $d['ServiceName']; Binary = $d['ServiceFileName']; StartType = $d['ServiceStartType']; Account = $d['ServiceAccount']
-            InstalledBy = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); LogonId = $d['SubjectLogonId'] })
+        $evd = Get-EvData $e
+        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 4697; Source = 'Security'; Service = $evd['ServiceName']; Binary = $evd['ServiceFileName']; StartType = $evd['ServiceStartType']; Account = $evd['ServiceAccount']
+            InstalledBy = ("{0}\{1}" -f $evd['SubjectDomainName'], $evd['SubjectUserName']); LogonId = $evd['SubjectLogonId'] })
     }
     foreach ($r in $rows) {
         $now = @($D.Services | Where-Object { $_.Name -eq $r.Service })
@@ -2143,26 +2143,26 @@ Invoke-Step "3.4 Задачі: 4698-4702 (Security) + TaskScheduler/Operational 
     $mean = @{ 4698 = 'Задачу СТВОРЕНО'; 4699 = 'Задачу видалено'; 4700 = 'Задачу увімкнено'; 4701 = 'Задачу вимкнено'; 4702 = 'Задачу змінено'
                106 = 'Задачу зареєстровано'; 140 = 'Задачу оновлено'; 141 = 'Задачу видалено'; 200 = 'Запущено дію задачі'; 201 = 'Дію задачі завершено' }
     foreach ($e in (Get-Ev 'Security' @(4698, 4699, 4700, 4701, 4702))) {
-        $d = Get-EvData $e
-        $xml = [string]$d['TaskContent']; if (-not $xml) { $xml = [string]$d['TaskContentNew'] }
+        $evd = Get-EvData $e
+        $xml = [string]$evd['TaskContent']; if (-not $xml) { $xml = [string]$evd['TaskContentNew'] }
         $cmd = ''; $args2 = ''; $auth = ''
         if ($xml -match '(?s)<Command>(.*?)</Command>') { $cmd = $Matches[1] }
         if ($xml -match '(?s)<Arguments>(.*?)</Arguments>') { $args2 = $Matches[1] }
         if ($xml -match '(?s)<Author>(.*?)</Author>') { $auth = $Matches[1] }
-        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Meaning = $mean[[int]$e.Id]; TaskName = $d['TaskName']
-            Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); Author = $auth; Command = ("{0} {1}" -f $cmd, $args2).Trim(); Result = '' })
+        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Meaning = $mean[[int]$e.Id]; TaskName = $evd['TaskName']
+            Actor = ("{0}\{1}" -f $evd['SubjectDomainName'], $evd['SubjectUserName']); Author = $auth; Command = ("{0} {1}" -f $cmd, $args2).Trim(); Result = '' })
     }
     foreach ($e in (Get-Ev 'Microsoft-Windows-TaskScheduler/Operational' @(106, 140, 141, 200, 201))) {
-        $d = Get-EvData $e
-        if ([string]$d['TaskName'] -like '\Microsoft\*') {
+        $evd = Get-EvData $e
+        if ([string]$evd['TaskName'] -like '\Microsoft\*') {
             # штатні задачі Windows — шум; лишаємо ті, що зареєстровані/змінені користувачем або запускають інтерпретатор/нестандартний шлях
-            $actor = [string]$(if ($d['UserContext']) { $d['UserContext'] } else { $d['UserName'] })
+            $actor = [string]$(if ($evd['UserContext']) { $evd['UserContext'] } else { $evd['UserName'] })
             if ($e.Id -in 200, 201) { $actor = '' }
-            $exe = Get-ExeFromCmd ([string]$d['ActionName'])
-            if (-not (Get-MsTaskSuspicion $exe ([string]$d['ActionName']) 'Microsoft' $actor)) { continue }
+            $exe = Get-ExeFromCmd ([string]$evd['ActionName'])
+            if (-not (Get-MsTaskSuspicion $exe ([string]$evd['ActionName']) 'Microsoft' $actor)) { continue }
         }
-        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Meaning = $mean[[int]$e.Id]; TaskName = $d['TaskName']
-            Actor = $(if ($d['UserContext']) { $d['UserContext'] } else { $d['UserName'] }); Author = ''; Command = $d['ActionName']; Result = $d['ResultCode'] })
+        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Meaning = $mean[[int]$e.Id]; TaskName = $evd['TaskName']
+            Actor = $(if ($evd['UserContext']) { $evd['UserContext'] } else { $evd['UserName'] }); Author = ''; Command = $evd['ActionName']; Result = $evd['ResultCode'] })
     }
     foreach ($r in $rows) { $r | Add-Member -NotePropertyName Match -NotePropertyValue (Test-KwMatch "$($r.TaskName) $($r.Command) $($r.Author)") }
     $D.TaskEvents = Arr ($rows | Sort-Object TimeUtc)
@@ -2174,20 +2174,20 @@ Invoke-Step "3.5 Зміни правил firewall: 2004/2005/2006/2033/2052/2097
                2033 = 'Усі правила видалено'; 4946 = 'Правило додано (Security)'; 4947 = 'Правило змінено (Security)'; 4948 = 'Правило видалено (Security)'; 4950 = 'Змінено налаштування firewall' }
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($e in (Get-Ev 'Microsoft-Windows-Windows Firewall With Advanced Security/Firewall' @(2004, 2005, 2006, 2033, 2052, 2097, 2099))) {
-        $d = Get-EvData $e
-        $modUser = Resolve-Sid ([string]$d['ModifyingUser'])
-        $modApp  = [string]$d['ModifyingApplication']
+        $evd = Get-EvData $e
+        $modUser = Resolve-Sid ([string]$evd['ModifyingUser'])
+        $modApp  = [string]$evd['ModifyingApplication']
         $auto = ($modApp -match '(?i)\\Windows\\System32\\svchost\.exe$' -or $modUser -match '(?i)mpssvc|SYSTEM|СИСТЕМА')
         $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Meaning = $mean[[int]$e.Id]
-            RuleName = $d['RuleName']; RuleId = $d['RuleId']; Direction = $d['Direction']; Action = $d['Action']; Protocol = $d['Protocol']
-            LocalPorts = $d['LocalPorts']; RemotePorts = $d['RemotePorts']; App = $d['ApplicationPath']; ModifiedBy = $modUser; ModifyingApp = $modApp
+            RuleName = $evd['RuleName']; RuleId = $evd['RuleId']; Direction = $evd['Direction']; Action = $evd['Action']; Protocol = $evd['Protocol']
+            LocalPorts = $evd['LocalPorts']; RemotePorts = $evd['RemotePorts']; App = $evd['ApplicationPath']; ModifiedBy = $modUser; ModifyingApp = $modApp
             Category = $(if ($auto) { 'Windows / служба (автоматично)' } else { 'Стороннє / ручне' }); Initiator = '' })
     }
     foreach ($e in (Get-Ev 'Security' @(4946, 4947, 4948, 4950))) {
-        $d = Get-EvData $e
+        $evd = Get-EvData $e
         $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Meaning = $mean[[int]$e.Id]
-            RuleName = $d['RuleName']; RuleId = $d['RuleId']; Direction = ''; Action = ''; Protocol = ''; LocalPorts = ''; RemotePorts = ''; App = ''
-            ModifiedBy = ''; ModifyingApp = ''; Category = 'Security audit'; Initiator = (Format-EvData $d @('RuleName', 'RuleId')) })
+            RuleName = $evd['RuleName']; RuleId = $evd['RuleId']; Direction = ''; Action = ''; Protocol = ''; LocalPorts = ''; RemotePorts = ''; App = ''
+            ModifiedBy = ''; ModifyingApp = ''; Category = 'Security audit'; Initiator = (Format-EvData $evd @('RuleName', 'RuleId')) })
     }
     foreach ($r in $rows) { $r | Add-Member -NotePropertyName Match -NotePropertyValue ((Test-KwMatch "$($r.RuleName) $($r.App)") -or ("$($r.LocalPorts),$($r.RemotePorts)" -match '(^|,)1688(,|$)')) }
     $D.FwEvents = Arr ($rows | Sort-Object TimeUtc)
@@ -2199,11 +2199,11 @@ Invoke-Step "3.6 Defender: виявлення, вимкнення захисту
                1119 = 'Критична помилка дії'; 5001 = 'Real-time protection ВИМКНЕНО'; 5004 = 'Змінено real-time protection'; 5007 = 'Змінено конфігурацію Defender'
                5010 = 'Сканування spyware вимкнено'; 5012 = 'Сканування вірусів вимкнено'; 5013 = 'Tamper protection заблокував зміну' }
     $rows = foreach ($e in (Get-Ev 'Microsoft-Windows-Windows Defender/Operational' @(1006, 1116, 1117, 1118, 1119, 5001, 5004, 5007, 5010, 5012, 5013))) {
-        $d = Get-EvData $e
+        $evd = Get-EvData $e
         $det = ''
-        if ($e.Id -eq 5007) { $det = ("{0}  →  {1}" -f $d['Old Value'], $d['New Value']) }
-        elseif ($e.Id -in 1006, 1116, 1117, 1118, 1119) { $det = ("{0} | {1} | {2}" -f $d['Threat Name'], $d['Path'], $d['Action Name']) }
-        else { $det = Format-EvData $d @('Product Name', 'Product Version') }
+        if ($e.Id -eq 5007) { $det = ("{0}  →  {1}" -f $evd['Old Value'], $evd['New Value']) }
+        elseif ($e.Id -in 1006, 1116, 1117, 1118, 1119) { $det = ("{0} | {1} | {2}" -f $evd['Threat Name'], $evd['Path'], $evd['Action Name']) }
+        else { $det = Format-EvData $evd @('Product Name', 'Product Version') }
         [pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Meaning = $mean[[int]$e.Id]; Details = $det
             Exclusion = ($det -match '(?i)\\Exclusions\\'); Match = (Test-KwMatch $det) }
     }
@@ -2214,39 +2214,39 @@ Invoke-Step "3.6 Defender: виявлення, вимкнення захисту
 Invoke-Step "3.7 Запуск процесів за LOLBin/IOC (Sysmon 1, Security 4688) + Sysmon 11/13/3 за IOC" {
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($e in (Get-Ev 'Microsoft-Windows-Sysmon/Operational' @(1))) {
-        $d = Get-EvData $e
-        $why = Get-ExecReason $d['Image'] $d['CommandLine'] $d['Hashes']
+        $evd = Get-EvData $e
+        $why = Get-ExecReason $evd['Image'] $evd['CommandLine'] $evd['Hashes']
         if (-not $why) { continue }
-        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); Source = 'Sysmon 1'; Image = $d['Image']; CommandLine = $d['CommandLine']
-            Parent = $d['ParentImage']; ParentCommandLine = $d['ParentCommandLine']; User = $d['User']; LogonId = $d['LogonId']; SHA256 = (Get-Sha256FromHashes $d['Hashes']); Reason = $why })
+        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); Source = 'Sysmon 1'; Image = $evd['Image']; CommandLine = $evd['CommandLine']
+            Parent = $evd['ParentImage']; ParentCommandLine = $evd['ParentCommandLine']; User = $evd['User']; LogonId = $evd['LogonId']; SHA256 = (Get-Sha256FromHashes $evd['Hashes']); Reason = $why })
     }
     foreach ($e in (Get-Ev 'Security' @(4688))) {
-        $d = Get-EvData $e
-        $why = Get-ExecReason $d['NewProcessName'] $d['CommandLine'] ''
+        $evd = Get-EvData $e
+        $why = Get-ExecReason $evd['NewProcessName'] $evd['CommandLine'] ''
         if (-not $why) { continue }
-        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); Source = 'Security 4688'; Image = $d['NewProcessName']; CommandLine = $d['CommandLine']
-            Parent = $d['ParentProcessName']; ParentCommandLine = ''; User = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); LogonId = $d['SubjectLogonId']; SHA256 = ''; Reason = $why })
+        $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); Source = 'Security 4688'; Image = $evd['NewProcessName']; CommandLine = $evd['CommandLine']
+            Parent = $evd['ParentProcessName']; ParentCommandLine = ''; User = ("{0}\{1}" -f $evd['SubjectDomainName'], $evd['SubjectUserName']); LogonId = $evd['SubjectLogonId']; SHA256 = ''; Reason = $why })
     }
     $D.Exec = Arr ($rows | Sort-Object TimeUtc)
     Save-Csv $D.Exec '03_eventlogs\process_exec_lolbin_ioc.csv'
 
     $misc = New-Object System.Collections.Generic.List[object]
     foreach ($e in (Get-Ev 'Microsoft-Windows-Sysmon/Operational' @(11, 13, 3))) {
-        $d = Get-EvData $e
+        $evd = Get-EvData $e
         $keep = ''; $target = ''
         if ($e.Id -eq 11) {
-            $target = [string]$d['TargetFilename']
+            $target = [string]$evd['TargetFilename']
             if (Test-KwMatch $target) { $keep = 'Файл за маскою IOC' }
             elseif ($target -match '(?i)\.(exe|dll|sys|scr|ps1|bat|cmd|vbs|js|hta|lnk)$' -and (Get-PathClass $target) -in @('Нестандартний', 'Користувацький/тимчасовий')) { $keep = 'Виконуваний файл у нестандартному місці' }
         } elseif ($e.Id -eq 13) {
-            $target = ("{0} = {1}" -f $d['TargetObject'], $d['Details'])
+            $target = ("{0} = {1}" -f $evd['TargetObject'], $evd['Details'])
             if ($target -match '(?i)Windows Defender\\Exclusions|KeyManagementService|\\CurrentVersion\\Run|Image File Execution Options|\\Services\\[^\\]+\\ImagePath' -or (Test-KwMatch $target)) { $keep = 'Реєстр: персистентність/Defender/KMS' }
         } else {
-            $target = ("{0}:{1} → {2}:{3} ({4})" -f $d['SourceIp'], $d['SourcePort'], $d['DestinationIp'], $d['DestinationPort'], $d['Protocol'])
-            if ((Test-IocIP $target) -or (Test-KwMatch $d['Image'])) { $keep = 'Мережа: IOC IP / процес за маскою' }
+            $target = ("{0}:{1} → {2}:{3} ({4})" -f $evd['SourceIp'], $evd['SourcePort'], $evd['DestinationIp'], $evd['DestinationPort'], $evd['Protocol'])
+            if ((Test-IocIP $target) -or (Test-KwMatch $evd['Image'])) { $keep = 'Мережа: IOC IP / процес за маскою' }
         }
         if (-not $keep) { continue }
-        $misc.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = ("Sysmon {0}" -f $e.Id); Image = $d['Image']; Target = $target; User = $d['User']; Reason = $keep })
+        $misc.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = ("Sysmon {0}" -f $e.Id); Image = $evd['Image']; Target = $target; User = $evd['User']; Reason = $keep })
     }
     $D.SysmonMisc = Arr ($misc | Sort-Object TimeUtc)
     Save-Csv $D.SysmonMisc '03_eventlogs\sysmon_file_reg_net_ioc.csv'
@@ -2256,14 +2256,14 @@ Invoke-Step "3.8 PowerShell 4104 (Script Block Logging) — підозрілі �
     $rx = '(?i)(add-mppreference|set-mppreference|msft_mppreference|downloadstring|downloadfile|invoke-webrequest|\biex\b|invoke-expression|frombase64string|net\.webclient|bitsadmin|certutil|slmgr|advfirewall|new-netfirewallrule|clear-eventlog|wevtutil|reg\s+add|schtasks|new-service|sc\.exe\s+create)'
     $selfSkipped = 0
     $rows = foreach ($e in (Get-Ev 'Microsoft-Windows-PowerShell/Operational' @(4104))) {
-        $d = Get-EvData $e
-        $txt = [string]$d['ScriptBlockText']
+        $evd = Get-EvData $e
+        $txt = [string]$evd['ScriptBlockText']
         if (-not ($txt -match $rx -or (Test-KwMatch $txt) -or (Test-IocIP $txt))) { continue }
         # Власний код коллектора: той самий файл або фрагмент його тексту (4104 ділить великі скрипти на частини)
         $txtN = $txt.Replace("`r", '').Trim()
-        if (($ToolPathTop -and [string]$d['Path'] -eq $ToolPathTop) -or ($OwnTextNorm -and $txtN.Length -ge 40 -and $OwnTextNorm.Contains($txtN))) { $selfSkipped++; continue }
+        if (($ToolPathTop -and [string]$evd['Path'] -eq $ToolPathTop) -or ($OwnTextNorm -and $txtN.Length -ge 40 -and $OwnTextNorm.Contains($txtN))) { $selfSkipped++; continue }
         $snip = $txt; if ($snip.Length -gt 600) { $snip = $snip.Substring(0, 600) + '…' }
-        [pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); ScriptBlockId = $d['ScriptBlockId']; Path = $d['Path']; Part = ("{0}/{1}" -f $d['MessageNumber'], $d['MessageTotal']); Snippet = $snip }
+        [pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); ScriptBlockId = $evd['ScriptBlockId']; Path = $evd['Path']; Part = ("{0}/{1}" -f $evd['MessageNumber'], $evd['MessageTotal']); Snippet = $snip }
     }
     $D.Ps4104 = Arr ($rows | Sort-Object TimeUtc)
     if ($selfSkipped) { Add-Note ("4104: пропущено {0} script block(ів), що є текстом самого коллектора (збіг шляху або вмісту) — щоб не давати хибних прапорців." -f $selfSkipped) }
@@ -2284,53 +2284,53 @@ $AdUacCodes = @{ '%%2096' = @('Високо', "Вимкнено Kerberos preauth
 $AdPrivGroupRx = '(-512|-518|-519|-520)$|^S-1-5-32-(544|548|549|551)$'   # DA, Schema, EA, GPO Creators; Administrators, Account/Server/Backup Operators
 
 function Get-AdAttackRow {   # одна подія (Id + словник EventData) -> рядок з технікою і рівнем, або $null якщо штатна
-    param([int]$Id, $d, [string]$DomainDN = '')
-    $ip = ([string]$d['IpAddress']) -replace '^::ffff:', ''
+    param([int]$Id, $evd, [string]$DomainDN = '')
+    $ip = ([string]$evd['IpAddress']) -replace '^::ffff:', ''
     $row = $null
     switch ($Id) {
         4769 {
-            $svc = [string]$d['ServiceName']
+            $svc = [string]$evd['ServiceName']
             if ($svc -match '\$$' -or $svc -match '^(?i)krbtgt') { return $null }
-            $row = @{ Technique = 'Kerberoasting (слабке шифрування квитка)'; Severity = 'Середньо'; Actor = [string]$d['TargetUserName']; Target = $svc
-                      Details = ("шифрування {0}" -f $d['TicketEncryptionType']) }
+            $row = @{ Technique = 'Kerberoasting (слабке шифрування квитка)'; Severity = 'Середньо'; Actor = [string]$evd['TargetUserName']; Target = $svc
+                      Details = ("шифрування {0}" -f $evd['TicketEncryptionType']) }
         }
         4768 {
-            $row = @{ Technique = 'AS-REP roasting (квиток без preauth)'; Severity = 'Високо'; Actor = ''; Target = [string]$d['TargetUserName']
-                      Details = ("PreAuthType={0}; шифрування {1}" -f $d['PreAuthType'], $d['TicketEncryptionType']) }
+            $row = @{ Technique = 'AS-REP roasting (квиток без preauth)'; Severity = 'Високо'; Actor = ''; Target = [string]$evd['TargetUserName']
+                      Details = ("PreAuthType={0}; шифрування {1}" -f $evd['PreAuthType'], $evd['TicketEncryptionType']) }
         }
         4771 {
-            $row = @{ Technique = 'Невдала Kerberos preauth (підбір / spraying)'; Severity = 'Інфо'; Actor = ''; Target = [string]$d['TargetUserName']; Details = ("Status={0}" -f $d['Status']) }
+            $row = @{ Technique = 'Невдала Kerberos preauth (підбір / spraying)'; Severity = 'Інфо'; Actor = ''; Target = [string]$evd['TargetUserName']; Details = ("Status={0}" -f $evd['Status']) }
         }
         4662 {
-            $props = ([string]$d['Properties']).ToLowerInvariant()
+            $props = ([string]$evd['Properties']).ToLowerInvariant()
             $hit = @($AdReplGuids.Keys | Where-Object { $props.Contains($_) } | ForEach-Object { $AdReplGuids[$_] })
             if (-not $hit.Count) { return $null }
-            $actor = [string]$d['SubjectUserName']
+            $actor = [string]$evd['SubjectUserName']
             if ($actor -match '\$$') { return $null }   # реплікація між DC (компʼютерні облікові записи) — штатна
             $sev = 'Критично'; $note = ''
             if ($actor -match '^(?i)(MSOL_|AAD_|Sync_)') { $sev = 'Високо'; $note = ' — ймовірно Azure AD Connect / Entra Connect, перевірте' }
-            $row = @{ Technique = 'DCSync (права реплікації від не-DC)'; Severity = $sev; Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $actor); Target = [string]$d['ObjectName']
+            $row = @{ Technique = 'DCSync (права реплікації від не-DC)'; Severity = $sev; Actor = ("{0}\{1}" -f $evd['SubjectDomainName'], $actor); Target = [string]$evd['ObjectName']
                       Details = (($hit -join ', ') + $note) }
         }
         { $_ -in 4728, 4732, 4756, 4729, 4733, 4757 } {
-            $gs = [string]$d['TargetSid']
-            if ($gs -notmatch $AdPrivGroupRx -and [string]$d['TargetUserName'] -ne 'DnsAdmins') { return $null }
+            $gs = [string]$evd['TargetSid']
+            if ($gs -notmatch $AdPrivGroupRx -and [string]$evd['TargetUserName'] -ne 'DnsAdmins') { return $null }
             $add = ($Id -in 4728, 4732, 4756)
-            $member = [string]$d['MemberName']; if (-not $member -or $member -eq '-') { $member = [string]$d['MemberSid'] }
+            $member = [string]$evd['MemberName']; if (-not $member -or $member -eq '-') { $member = [string]$evd['MemberSid'] }
             $row = @{ Technique = $(if ($add) { 'Додано до привілейованої групи' } else { 'Видалено з привілейованої групи' }); Severity = $(if ($add) { 'Високо' } else { 'Середньо' })
-                      Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); Target = ("{0} → {1}" -f $member, $d['TargetUserName']); Details = "SID групи $gs" }
+                      Actor = ("{0}\{1}" -f $evd['SubjectDomainName'], $evd['SubjectUserName']); Target = ("{0} → {1}" -f $member, $evd['TargetUserName']); Details = "SID групи $gs" }
         }
         { $_ -in 4738, 4742 } {
-            $uac = [string]$d['UserAccountControl']
+            $uac = [string]$evd['UserAccountControl']
             $hits = @($AdUacCodes.Keys | Where-Object { $uac.Contains($_) })
             if (-not $hits.Count) { return $null }
             $sev = 'Середньо'; if (@($hits | Where-Object { $AdUacCodes[$_][0] -eq 'Високо' }).Count) { $sev = 'Високо' }
-            $row = @{ Technique = 'Небезпечна зміна userAccountControl'; Severity = $sev; Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); Target = [string]$d['TargetUserName']
+            $row = @{ Technique = 'Небезпечна зміна userAccountControl'; Severity = $sev; Actor = ("{0}\{1}" -f $evd['SubjectDomainName'], $evd['SubjectUserName']); Target = [string]$evd['TargetUserName']
                       Details = ((@($hits | ForEach-Object { $AdUacCodes[$_][1] })) -join '; ') }
         }
         5136 {
-            $attr = [string]$d['AttributeLDAPDisplayName']; $obj = [string]$d['ObjectDN']; $cls = [string]$d['ObjectClass']
-            if ([string]$d['OperationType'] -ne '%%14674') { return $null }   # цікавить лише додане значення
+            $attr = [string]$evd['AttributeLDAPDisplayName']; $obj = [string]$evd['ObjectDN']; $cls = [string]$evd['ObjectClass']
+            if ([string]$evd['OperationType'] -ne '%%14674') { return $null }   # цікавить лише додане значення
             $t = ''; $sev = 'Високо'
             switch ($attr) {
                 'msDS-KeyCredentialLink' { $t = 'Shadow Credentials (msDS-KeyCredentialLink)' }
@@ -2343,8 +2343,8 @@ function Get-AdAttackRow {   # одна подія (Id + словник EventDat
                 }
             }
             if (-not $t) { return $null }
-            $val = [string]$d['AttributeValue']; if ($val.Length -gt 200) { $val = $val.Substring(0, 200) + '…' }
-            $row = @{ Technique = $t; Severity = $sev; Actor = ("{0}\{1}" -f $d['SubjectDomainName'], $d['SubjectUserName']); Target = $obj; Details = ("{0} = {1}" -f $attr, $val) }
+            $val = [string]$evd['AttributeValue']; if ($val.Length -gt 200) { $val = $val.Substring(0, 200) + '…' }
+            $row = @{ Technique = $t; Severity = $sev; Actor = ("{0}\{1}" -f $evd['SubjectDomainName'], $evd['SubjectUserName']); Target = $obj; Details = ("{0} = {1}" -f $attr, $val) }
         }
         default { return $null }
     }
