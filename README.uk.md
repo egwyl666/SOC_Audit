@@ -35,6 +35,24 @@ Windows, режим `FullLanguage`. Якщо щось не так — зрозу
 
 ## 2. Способи запуску
 
+### Швидкий старт: одна команда
+
+Відкрийте PowerShell **від імені адміністратора** і вставте один рядок. Він завантажує останню версію скрипта з `main`,
+виводить її SHA256 і запускає повний збір за останні 24 години; після завершення відкривається звіт.
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24
+```
+
+Для реального інциденту додайте свої IOC і пишіть результати на зовнішній диск:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24 -NamePatterns '*evil*' -IocIPs '203.0.113.5' -OutRoot 'E:\SOC_Evidence'
+```
+
+> Увага: без власних IOC скрипт використовує тестові маски KMSAuto (про це є банер у звіті). Зафіксуйте виведений
+> SHA256 у тікеті — він визначає точну версію, яку було запущено.
+
 ### 2.1 Через `-File` — основний
 
 ```powershell
