@@ -28,6 +28,11 @@ $steps | Format-Table Step, Status, Seconds -AutoSize | Out-String -Width 220 | 
 $err = @($steps | Where-Object { $_.Status -ne 'OK' })
 foreach ($e in $err) { $fail += ("крок «{0}»: {1}" -f $e.Step, $e.Error) }
 if ($steps.Count -lt 30) { $fail += "лише $($steps.Count) кроків" }
+$visPath = Join-Path $case.FullName '02_system\event_visibility.csv'
+$vis = @(); if (Test-Path -LiteralPath $visPath) { $vis = @(Import-Csv -LiteralPath $visPath) }
+if ($vis.Count -lt 20) { $fail += "event_visibility.csv: лише $($vis.Count) категорій" }
+Write-Host '--- Видимість за категоріями подій'
+$vis | Format-Table Category, EventIds, Status, Events24h -AutoSize | Out-String -Width 220 | Write-Host
 Write-Host '--- Сліди запуску (кількість рядків)'
 foreach ($f in 'userassist.csv', 'runmru.csv', 'shimcache.csv', 'amcache_files.csv') {
     $pth = Join-Path $case.FullName "05_artifacts\$f"

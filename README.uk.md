@@ -2,7 +2,7 @@
 
 [English](README.md) | Українська
 
-**SOC Live Response Collector v1.7.0** — один скрипт збору доказів і первинного аналізу Windows-хоста
+**SOC Live Response Collector v1.7.1** — один скрипт збору доказів і первинного аналізу Windows-хоста
 (замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`). Узгоджено з **NIST SP 800-86**.
 
 Скрипт збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти, перевіряє
@@ -191,6 +191,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | **2. Система** | Облікові записи, адміни, політики, служби, задачі (автор з XML), автозапуск, WMI, Defender, ліцензування/KMS, firewall, журнали подій (розмір/глибина/покриття) та налаштування аудиту |
 | **2.9 Налаштування безпеки** | SMBv1 і підпис SMB, LLMNR/NetBIOS, WDigest, захист LSA (RunAsPPL), Credential Guard, LM/NTLM, UAC, RDP NLA, PowerShell v2, BitLocker, правила ASR, LAPS, обліковий запис «Гість», Print Spooler на DC, профілі firewall, давність останнього оновлення |
 | **2.10 AD: конфігурація** (лише DC) | Облікові записи під Kerberoasting і AS-REP roasting, неконтрольоване делегування, вік пароля krbtgt, прапорці привілейованих облікових записів, MachineAccountQuota, парольна політика і блокування, склад привілейованих груп |
+| **2.11 Видимість подій** | Для кожної категорії подій (входи, RDP, створення процесів, PowerShell, служби, задачі, мережа, правила firewall, облікові записи і групи, політика аудиту, очищення журналу, спільні папки, Defender, WMI, WinRM; на DC — Kerberos і DS Access): чи вона пишеться (auditpol / канал / політика) і скільки подій реально є за 24 год. Статус: Бачимо / Частково / НЕ бачимо / Невідомо |
 | **3. Журнали за вікно** | 4625/4624/4648/4740/4776, зміни облікових записів, очищення журналів, RDP (1149, 21–25, 131, 140), служби (7045/4697/7040), задачі (4698–4702, TaskScheduler), зміни firewall (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC-запуски (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 |
 | **3.9 Оригінальні журнали** | Повний експорт `.evtx` (`wevtutil epl`) з SHA256 — для переаналізу Hayabusa / Chainsaw / EvtxECmd |
 | **3.10 AD: ознаки атак** (лише DC) | Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), зміни привілейованих груп, небезпечні зміни userAccountControl, 5136 (Shadow Credentials, RBCD, GPO, ACL AdminSDHolder і кореня домену). Спершу — перевірка, чи ці події взагалі аудитуються |
@@ -218,7 +219,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── manifest.csv.sha256          ← hash маніфесту
 ├── 00_tool\                     ← копія скрипта, яким збирали
 ├── 01_volatile\                 ← процеси, мережа, netstat_ano.txt, сесії
-├── 02_system\                   ← система (повні переліки: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; на DC — ad_config.csv, ad_risky_accounts.csv
+├── 02_system\                   ← система (повні переліки: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; event_visibility.csv; на DC — ad_config.csv, ad_risky_accounts.csv
 ├── 03_eventlogs\                ← вибірки журналів; на DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← оригінальні журнали .evtx + evtx_export.csv
 ├── 04_firewall\                 ← fw_rules_all.csv (усі правила, включно з вимкненими), журнал firewall
@@ -232,6 +233,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ### HTML-звіт
 
 - Перший розділ — «1.1 Стабільність надходження логів»: канал, подій за 24 год, усього записів, розмір, заповненість, глибина історії, режим; вимкнені канали підсвічено; під таблицею — ключові показники (покриття вікна, Sysmon, 4104, командний рядок у 4688)
+- У тому ж розділі — «1.2 Перевірка видимості за категоріями подій»: категорія, Event ID, джерело, статус, коментар (стан аудиту і подій за 24 год); `02_system\event_visibility.csv`
 - Бокове меню — 21 розділ (зокрема «13.1 Сліди запуску»), зокрема «4.1 Налаштування безпеки» і «5.1 Active Directory» (на DC)
 - Картки-лічильники та таблиця прапорців з рівнем (Критично / Високо / Середньо / Інфо)
 - У кожній таблиці: **фільтр** (поле пошуку) і **сортування** (клік по заголовку)
@@ -298,7 +300,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 | Файл | Що перевіряє |
 |---|---|
-| `tests/run-tests.ps1` | Unit-тести без зовнішніх модулів: IOC IP, розбір `auditpol` (EN/RU/UA), ознаки атак на AD, пошук рядків у БД, hash відкритих файлів, збіг імен функцій з алиасами, крок 2.9 для станції та DC |
+| `tests/run-tests.ps1` | Unit-тести без зовнішніх модулів: IOC IP, розбір `auditpol` (EN/RU/UA), ознаки атак на AD, пошук рядків у БД, hash відкритих файлів, збіг імен функцій з алиасами, крок 2.9 для станції та DC, крок 2.11 на підставних даних, підрахунок подій за ID проти `Get-WinEvent` |
 | `tests/check-encoding.ps1` | Усі `*.ps1` — UTF-8 з BOM і CRLF |
 | `tests/smoke.ps1` | Повний запуск збору окремим процесом: звіт, маніфест, жодного кроку зі статусом `ПОМИЛКА` |
 

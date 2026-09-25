@@ -2,7 +2,7 @@
 
 English | [Українська](README.uk.md)
 
-**SOC Live Response Collector v1.7.0** — a single script for evidence collection and first-pass analysis of a Windows host
+**SOC Live Response Collector v1.7.1** — a single script for evidence collection and first-pass analysis of a Windows host
 (replaces the old main audit + `fwlog.ps1` + `filesinter.ps1`). Aligned with **NIST SP 800-86**.
 
 The script collects volatile data, persistence, event logs, `pfirewall.log` and file artifacts, checks security
@@ -193,6 +193,7 @@ The AD steps (2.10, 3.10) turn on automatically when the host is a domain contro
 | **2. System** | Accounts, admins, policies, services, scheduled tasks (author from XML), autoruns, WMI, Defender, licensing/KMS, firewall, event logs (size/depth/coverage) and audit policy |
 | **2.9 Security settings** | SMBv1 and SMB signing, LLMNR/NetBIOS, WDigest, LSA protection (RunAsPPL), Credential Guard, LM/NTLM, UAC, RDP NLA, PowerShell v2, BitLocker, ASR rules, LAPS, Guest account, Print Spooler on a DC, firewall profiles, age of the last update |
 | **2.10 AD configuration** (DC only) | Kerberoastable and AS-REP-roastable accounts, unconstrained delegation, krbtgt password age, privileged account flags, MachineAccountQuota, password and lockout policy, privileged group members |
+| **2.11 Event visibility** | For each event category (logons, RDP, process creation, PowerShell, services, tasks, network, firewall rules, accounts and groups, audit policy, log clearing, file shares, Defender, WMI, WinRM; Kerberos and DS Access on a DC): whether it is written (auditpol / channel / policy) and how many events there actually are in the last 24 h. Status: Бачимо / Частково / НЕ бачимо / Невідомо |
 | **3. Logs for the window** | 4625/4624/4648/4740/4776, account changes, log clearing, RDP (1149, 21–25, 131, 140), services (7045/4697/7040), tasks (4698–4702, TaskScheduler), firewall changes (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC executions (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 |
 | **3.9 Original logs** | Full `.evtx` export (`wevtutil epl`) with SHA256 — for re-analysis with Hayabusa / Chainsaw / EvtxECmd |
 | **3.10 AD attack signs** (DC only) | Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), privileged group changes, dangerous userAccountControl changes, 5136 (Shadow Credentials, RBCD, GPO, AdminSDHolder and domain-root ACL). First checks whether these events are audited at all |
@@ -220,7 +221,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── manifest.csv.sha256          ← manifest hash
 ├── 00_tool\                     ← copy of the script used for collection
 ├── 01_volatile\                 ← processes, network, netstat_ano.txt, sessions
-├── 02_system\                   ← system (full lists: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; on a DC — ad_config.csv, ad_risky_accounts.csv
+├── 02_system\                   ← system (full lists: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; event_visibility.csv; on a DC — ad_config.csv, ad_risky_accounts.csv
 ├── 03_eventlogs\                ← log extracts; on a DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← original .evtx logs + evtx_export.csv
 ├── 04_firewall\                 ← fw_rules_all.csv (all rules, including disabled), firewall log
@@ -234,6 +235,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ### HTML report
 
 - First section — "1.1 Log ingestion stability": channel, events in the last 24 h, total records, size, fill, history depth, mode; disabled channels highlighted; below it the key indicators (window coverage, Sysmon, 4104, command line in 4688)
+- In the same section — "1.2 Event visibility by category": category, Event ID, source, status, comment (audit state and events in 24 h); `02_system\event_visibility.csv`
 - Sidebar navigation — 21 sections (incl. "13.1 Execution traces"), incl. "4.1 Security settings" and "5.1 Active Directory" (on a DC)
 - Counter cards and a flag table with severity (Critical / High / Medium / Info)
 - Every table has a **filter** (search box) and **sorting** (click a header)
@@ -300,7 +302,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 | File | What it checks |
 |---|---|
-| `tests/run-tests.ps1` | Unit tests without external modules: IOC IPs, `auditpol` parsing (EN/RU/UA), AD attack signs, string search in databases, hashing of open files, function names vs built-in aliases, step 2.9 for a workstation and a DC |
+| `tests/run-tests.ps1` | Unit tests without external modules: IOC IPs, `auditpol` parsing (EN/RU/UA), AD attack signs, string search in databases, hashing of open files, function names vs built-in aliases, step 2.9 for a workstation and a DC, step 2.11 on stub data, per-ID event counts compared with `Get-WinEvent` |
 | `tests/check-encoding.ps1` | Every `*.ps1` is UTF-8 with BOM and CRLF |
 | `tests/smoke.ps1` | Full collection run in a separate process: report, manifest, no step with status `ПОМИЛКА` |
 

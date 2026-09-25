@@ -182,7 +182,29 @@ try {
         $e24 = Get-LogEvents24h 'System' $now
         $cnt24 = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $now.AddHours(-24); EndTime = $now } -ErrorAction SilentlyContinue).Count
         Assert-True ("Get-LogEvents24h System = {0}, прямий підрахунок = {1}" -f $e24, $cnt24) ($null -ne $e24 -and [string]$e24 -notlike '≈*' -and [math]::Abs([int64]$e24 - $cnt24) -le 2)
+        $top = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $now.AddHours(-24); EndTime = $now } -ErrorAction SilentlyContinue | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 2)
+        if ($top.Count -eq 2) {
+            $ids = @([int]$top[0].Name, [int]$top[1].Name)
+            $ec = Get-EventIdCount24h 'System' $ids $now
+            $direct = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = $ids; StartTime = $now.AddHours(-24); EndTime = $now } -ErrorAction SilentlyContinue).Count
+            Assert-True ("Get-EventIdCount24h System [{0}] = {1}, прямий підрахунок = {2}" -f ($ids -join ','), $(if ($ec) { $ec.Total } else { 'null' }), $direct) ($ec -and [math]::Abs([int64]$ec.Total - $direct) -le 2 -and $ec.ById.Count -eq 2 -and -not $ec.Capped)
+            Assert-True 'Get-EventIdCount24h: ліміт -> Capped' ((Get-EventIdCount24h 'System' $ids $now -Limit 1).Capped -eq ($direct -ge 1))
+        }
+        Assert-True 'Get-EventIdCount24h: неіснуючий канал -> null' ($null -eq (Get-EventIdCount24h 'SOC-Collect-No-Such/Log' @(1) $now))
     }
+
+    Test-Group 'Видимість за категоріями подій'
+    $xp = Get-EventIdXPath @(4624, 4625) ([datetime]'2026-01-01T00:00:00Z') ([datetime]'2026-01-02T00:00:00Z')
+    Assert-True 'XPath: кілька ID через or' ($xp -like '*(EventID=4624 or EventID=4625) and TimeCreated*')
+    Assert-True 'XPath: без ID — лише час' ((Get-EventIdXPath @() (Get-Date).AddHours(-1) (Get-Date)) -notmatch 'EventID')
+    Assert-True 'увімкнено + події = Бачимо'        ((Get-VisibilityStatus $true $false 10) -eq 'Бачимо')
+    Assert-True 'увімкнено, 0 подій = Бачимо'      ((Get-VisibilityStatus $true $false 0) -eq 'Бачимо')
+    Assert-True 'частково = Частково'               ((Get-VisibilityStatus $true $true 5) -eq 'Частково')
+    Assert-True 'вимкнено, 0 = НЕ бачимо'           ((Get-VisibilityStatus $false $false 0) -eq 'НЕ бачимо')
+    Assert-True 'вимкнено, лічильник null = НЕ бачимо' ((Get-VisibilityStatus $false $false $null) -eq 'НЕ бачимо')
+    Assert-True 'вимкнено, але події є = Частково' ((Get-VisibilityStatus $false $false 3) -eq 'Частково')
+    Assert-True 'стан невідомий, події є = Бачимо' ((Get-VisibilityStatus $null $false 3) -eq 'Бачимо')
+    Assert-True 'стан невідомий, 0 = Невідомо'      ((Get-VisibilityStatus $null $false 0) -eq 'Невідомо')
 
     Test-Group 'FILETIME'
     Assert-True '2024'                    ((ConvertFrom-AdFileTime 133700000000000000).Year -eq 2024)
@@ -258,6 +280,37 @@ try {
     }
     Assert-True 'DC: Spooler = ризик' (@($D.Hardening | Where-Object { $_.Check -like 'Print Spooler на контролері*' -and $_.Status -eq 'Ризик' }).Count -eq 1)
     Assert-True 'DC: LAPS = Н/д'      (@($D.Hardening | Where-Object { $_.Check -eq 'LAPS' -and $_.Status -eq 'Н/д' }).Count -eq 1)
+
+    Test-Group 'Крок 2.11 (видимість за категоріями) на підставних даних'
+    $step211 = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].CommandElements.Count -ge 3 -and $args[0].CommandElements[0].Extent.Text -eq 'Invoke-Step' -and $args[0].CommandElements[1].Extent.Text -like '"2.11 *' }, $true) | Select-Object -First 1
+    Assert-True 'крок 2.11 знайдено' ($null -ne $step211)
+    & {   # підставні auditpol / лічильники / канали — лише в цьому блоці
+        $audVals = @{ '9215' = 3; '922B' = 1; '9226' = 0; '9225' = 0; '9232' = 3; '9235' = 1; '922F' = 0 }
+        function Get-AuditSubcategory { param([string]$Guid) $k = $Guid.Substring(5, 4); if ($audVals.ContainsKey($k)) { [pscustomobject]@{ Value = $audVals[$k]; Text = '' } } else { [pscustomobject]@{ Value = $null; Text = '' } } }
+        function Get-EventIdCount24h { param([string]$Log, [int[]]$Ids, [datetime]$At, [int]$Limit = 100000)
+            if ($Log -like '*Sysmon*') { return $null }
+            $n = 0; if ($Log -eq 'Security' -and $Ids -contains 4624) { $n = 100 } elseif ($Log -eq 'Security' -and $Ids -contains 4719) { $n = 2 }
+            [pscustomobject]@{ Total = $n; ById = @{ $Ids[0] = $n }; Capped = $false } }
+        function Get-WinEvent { param([string]$ListLog, $ErrorAction) if ($ListLog -like '*Sysmon*') { throw 'немає' }; [pscustomobject]@{ IsEnabled = ($ListLog -notlike '*WinRM*') } }
+        $RunStart = Get-Date
+        foreach ($role in 1, 2) {
+            $D = @{ IsDC = ($role -eq 2); FwProfiles = @([pscustomobject]@{ Profile = 'Domain'; LogAllowed = 'False'; LogBlocked = 'True' }); EventVisibility = @() }
+            & ([scriptblock]::Create($step211.CommandElements[2].ScriptBlock.EndBlock.Extent.Text))
+            $v = @($D.EventVisibility)
+            Assert-True ("роль {0}: {1} категорій" -f $role, $v.Count) ($v.Count -ge $(if ($role -eq 2) { 30 } else { 26 }))
+            Assert-True "роль ${role}: статуси коректні" (@($v | Where-Object { $_.Status -notin 'Бачимо', 'Частково', 'НЕ бачимо', 'Невідомо' }).Count -eq 0)
+            Assert-True "роль ${role}: Kerberos лише на DC" ((@($v | Where-Object { $_.Category -like 'Kerberos*' }).Count -gt 0) -eq ($role -eq 2))
+        }
+        $g = { param($c) @($v | Where-Object { $_.Category -eq $c })[0] }
+        Assert-True '4624: Бачимо, 100 подій'          ((& $g 'Успішний вхід').Status -eq 'Бачимо' -and (& $g 'Успішний вхід').Events24h -eq 100)
+        Assert-True '4719: аудит вимкнено, події є'     ((& $g 'Зміна політики аудиту').Status -eq 'Частково' -and (& $g 'Зміна політики аудиту').AuditChanged)
+        Assert-True 'Sysmon відсутній = НЕ бачимо'      ((& $g 'Процеси (Sysmon)').Status -eq 'НЕ бачимо' -and (& $g 'Процеси (Sysmon)').Comment -like 'Sysmon не встановлено*')
+        Assert-True 'WinRM вимкнено = НЕ бачимо'        ((& $g 'WinRM / PowerShell Remoting').Status -eq 'НЕ бачимо')
+        Assert-True '5152: аудит вимкнено, pfirewall.log = Частково' ((& $g 'Мережа: заблоковані').Status -eq 'Частково' -and -not (& $g 'Мережа: заблоковані').AuditChanged)
+        Assert-True '5156: вимкнено = НЕ бачимо'        ((& $g 'Мережа: дозволені з''єднання').Status -eq 'НЕ бачимо')
+        Assert-True 'auditpol не прочитано, 0 = Невідомо' ((& $g 'Привілейований вхід').Status -eq 'Невідомо')
+        Assert-True '1102: Бачимо завжди'              ((& $g 'Очищення журналу').Status -eq 'Бачимо')
+    }
 }
 finally {
     $env:SystemRoot = $origSystemRoot

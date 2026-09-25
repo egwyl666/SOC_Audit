@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.7.1] — 2026-09-25
+
+Event visibility by category — the analyst's manual "what can we see" table, built automatically.
+Status: parser check and unit tests pass; Windows validation in CI; runs on DC01 / Pro to follow.
+
+### Added
+- Step **2.11 "Видимість за категоріями подій"** (`02_system\event_visibility.csv`). For each category — logons
+  (4624/4625/4648/4672/4634/4647/4776), RDP (21/24/25/1149), process creation (4688, Sysmon 1), Sysmon 3, PowerShell
+  (4104, 4103, transcription), services (4697/7045), tasks (4698-4702, TaskScheduler 106/140/141), network (5156,
+  5152/5157), firewall rule changes (4946-4948, 2004-2006/2097), user and group management, audit policy change (4719),
+  log clearing (1102/104), file shares (5140/5145), file access (4663), Defender (1116/1117), WMI-Activity, WinRM, and on
+  a DC Kerberos (4768/4771, 4769), DS Access (4662) and DS Changes (5136):
+  - the state of the source: auditpol subcategory by GUID (no locale dependence), channel, or registry policy;
+  - the actual number of events in the last 24 h by Event ID (EventLogReader, per-ID breakdown, limit 100 000);
+  - status Бачимо / Частково / НЕ бачимо / Невідомо and a generated comment; alternative sources are taken into
+    account (7045 in System, TaskScheduler channel, pfirewall.log, Firewall channel) as "Частково".
+- Report: subsection **1.2 "Перевірка видимості за категоріями подій"** under the log stability table, with a
+  summary line and colour by status.
+- One new flag (Середньо): an audit subcategory is off now, but its events exist in the last 24 h — the audit policy
+  may have been changed recently. Disabled audit itself is already flagged by step 2.8, so it is not duplicated.
+- Tests: status logic, XPath, step 2.11 on stub data (workstation and DC), per-ID counts compared with `Get-WinEvent`
+  on Windows; smoke run checks `event_visibility.csv`.
+
 ## [1.7.0] — 2026-09-25
 
 Complete source data and a clearer report. Flags and highlighting still work on the same subsets, so there is no extra noise.
