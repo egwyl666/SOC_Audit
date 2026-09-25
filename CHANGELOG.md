@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2] — 2026-09-25
+
+### Fixed
+- `auditpol`: the Russian "Без аудита" (no auditing) was not recognised and was shown as "not recognised". Matching now
+  uses word stems (`без аудит`, `нет аудит`, `немає аудит`, `no auditing`). Confirmed on the DC: localized `auditpol /r`
+  has 6 columns (no "Setting Value"), so the text column is used.
+
 ## [1.4.1] — 2026-09-25
 
 Fixes from the v1.4 run on a domain controller. Status: parser check and unit tests passed; **Windows run pending**.

@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.4.1 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.4.2 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -153,7 +153,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.4.1'
+$ToolVersion = '1.4.2'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -718,7 +718,7 @@ function ConvertFrom-AuditpolCsv {   # рядки 'auditpol /get /subcategory:{G
     if ($props.Count -ge 7 -and $last -match '^[0-3]$') { $res.Value = [int]$last; return $res }
     # запасний шлях — текст Inclusion Setting (EN/RU/UA)
     $t = $res.Text
-    if ($t -match '(?i)no auditing|нет аудита|немає аудиту|без аудиту') { $res.Value = 0; return $res }
+    if ($t -match '(?i)no auditing|без аудит|нет аудит|немає аудит') { $res.Value = 0; return $res }   # «Без аудита» (RU), «Без аудиту» / «Немає аудиту» (UA)
     $v = 0
     if ($t -match '(?i)success|успех|успіх') { $v = $v -bor 1 }
     if ($t -match '(?i)failure|сбой|збій|отказ|відмов|невдач') { $v = $v -bor 2 }

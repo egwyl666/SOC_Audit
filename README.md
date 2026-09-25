@@ -2,7 +2,7 @@
 
 English | [Українська](README.uk.md)
 
-**SOC Live Response Collector v1.4.1** — a single script for evidence collection and first-pass analysis of a Windows host
+**SOC Live Response Collector v1.4.2** — a single script for evidence collection and first-pass analysis of a Windows host
 (replaces the old main audit + `fwlog.ps1` + `filesinter.ps1`). Aligned with **NIST SP 800-86**.
 
 The script collects volatile data, persistence, event logs, `pfirewall.log` and file artifacts, checks security
@@ -28,7 +28,7 @@ Windows, `FullLanguage` mode. If something is wrong it prints a clear message an
 32-bit PowerShell on a 64-bit OS started via `-File` re-launches itself in 64-bit automatically.
 
 > Tested: v1.0 — Windows 11 / PS 5.1.26100, 34/34 steps; v1.1–v1.3 — domain controller (Windows Server, PS 5.1),
-> 64- and 32-bit, all steps OK. v1.4.1 — parser check and unit tests; Windows run pending.
+> 64- and 32-bit, all steps OK. v1.4.1 — DC OK (AD steps and localized auditpol parsing). v1.4.2 — one fix for recognising "Без аудита".
 
 Get the script via **Download raw file** or `git clone` — the repository stores it byte-for-byte (BOM + CRLF,
 see `.gitattributes`). Copy-pasting from the GitHub page may drop the BOM.
