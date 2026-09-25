@@ -633,15 +633,26 @@ function Get-LogAdvice {   # рекомендації щодо журналу: �
     return [pscustomobject]@{ Severity = $sev; HistoryDays = $days; Advice = ($adv -join ' | ') }
 }
 
-function Get-LogEvents24h {   # скільки подій записано в канал за 24 год до моменту збору — за різницею RecordId (без читання всіх подій)
-    param([string]$Name, [datetime]$At)
+function Get-LogEvents24h {   # скільки подій з часом у межах 24 год до моменту збору
+    # Точний підрахунок (EventLogReader, без рендерингу повідомлень), якщо подій не більше $ExactLimit;
+    # для дуже великих каналів — оцінка за різницею RecordId, позначена «≈» (порядок запису ≠ порядок часу після корекції годинника)
+    param([string]$Name, [datetime]$At, [int]$ExactLimit = 100000)
     $newest = $null; try { $newest = Get-WinEvent -LogName $Name -MaxEvents 1 -ErrorAction Stop } catch { return $null }
     if (-not $newest) { return 0 }
     $from = $At.AddHours(-24)
-    if ($newest.TimeCreated -lt $from) { return 0 }
     $first = $null; try { $first = Get-WinEvent -FilterHashtable @{ LogName = $Name; StartTime = $from } -Oldest -MaxEvents 1 -ErrorAction Stop } catch { return 0 }
-    if (-not $first -or $null -eq $first.RecordId -or $null -eq $newest.RecordId) { return $null }
-    return [int64]$newest.RecordId - [int64]$first.RecordId + 1
+    $est = $null
+    if ($first -and $null -ne $first.RecordId -and $null -ne $newest.RecordId) { $est = [int64]$newest.RecordId - [int64]$first.RecordId + 1 }
+    if ($null -ne $est -and $est -gt $ExactLimit) { return ('≈' + $est) }
+    $xp = "*[System[TimeCreated[@SystemTime>='{0}' and @SystemTime<='{1}']]]" -f $from.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ'), $At.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    $reader = $null; $n = 0
+    try {
+        $q = New-Object System.Diagnostics.Eventing.Reader.EventLogQuery($Name, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $xp)
+        $reader = New-Object System.Diagnostics.Eventing.Reader.EventLogReader($q)
+        while ($null -ne ($ev = $reader.ReadEvent())) { $n++; $ev.Dispose() }
+    } catch { if ($null -ne $est) { return ('≈' + $est) } else { return $null } }
+    finally { if ($reader) { $reader.Dispose() } }
+    return $n
 }
 
 # ─── Журнали подій ───
@@ -2850,9 +2861,9 @@ Invoke-Step "8. Формування HTML-звіту" {
          (H3 'Кроки збору') + (HT $StepLog -RowClass { param($r) if ($r.Status -ne 'OK') { 'bad' } })
     # ── 1.1 Стабільність надходження логів: компактна таблиця + ключові показники ──
     $ukNum = [Globalization.CultureInfo]::GetCultureInfo('uk-UA').NumberFormat
-    $fmtN = { param($v) if ($null -eq $v -or [string]$v -eq '') { '—' } else { ([int64]$v).ToString('N0', $ukNum) } }
+    $fmtN = { param($v) if ($null -eq $v -or [string]$v -eq '') { '—' } elseif ([string]$v -like '≈*') { '≈ ' + ([int64]([string]$v).TrimStart('≈')).ToString('N0', $ukNum) } else { ([int64]$v).ToString('N0', $ukNum) } }
     $lh = @($D.LogHealth | Where-Object { $_.Exists -eq $true })
-    $lhRows = @($lh | Sort-Object @{ Expression = { if ($_.Enabled -eq $true) { 0 } else { 1 } } }, @{ Expression = { [int64]$(if ($_.Events24h) { $_.Events24h } else { 0 }) }; Descending = $true } | ForEach-Object {
+    $lhRows = @($lh | Sort-Object @{ Expression = { if ($_.Enabled -eq $true) { 0 } else { 1 } } }, @{ Expression = { [int64]$(if ($_.Events24h) { ([string]$_.Events24h).TrimStart('≈') } else { 0 }) }; Descending = $true } | ForEach-Object {
         $off = ($_.Enabled -ne $true)
         [pscustomobject][ordered]@{
             'Канал' = $_.Log
@@ -2880,7 +2891,7 @@ Invoke-Step "8. Формування HTML-звіту" {
         'Канали, яких немає в системі' = $(if ($absent.Count) { $absent -join ', ' } else { 'немає' })
         'Усього каналів у системі / з подіями / увімкнено' = ("{0} / {1} / {2}" -f @($D.LogInventory).Count, @($D.LogInventory | Where-Object { [int64]$_.Records -gt 0 }).Count, @($D.LogInventory | Where-Object { $_.Enabled -eq $true }).Count)
     }
-    $b = (H3 ("Обсяг подій за останні 24 години (за станом на {0})" -f $RunStart.ToString('dd.MM.yyyy HH:mm')) 'Подій / 24 год — за різницею номерів записів (RecordId). Повні дані: 02_system\eventlog_health.csv; усі канали системи — розділ 4.') +
+    $b = (H3 ("Обсяг подій за останні 24 години (за станом на {0})" -f $RunStart.ToString('dd.MM.yyyy HH:mm')) 'Подій / 24 год — точний підрахунок за часом події; «≈» — оцінка за номерами записів для дуже великих каналів (понад 100 000 за добу). Повні дані: 02_system\eventlog_health.csv; усі канали системи — розділ 4.') +
          (HT ($lhRows | Select-Object 'Канал', 'Подій / 24 год', 'Всього записів', 'Розмір, МБ (макс.)', 'Заповнено, %', 'Історія, дн.', 'Режим', 'Стан', '_sev', '_off') -Cols @('Канал', 'Подій / 24 год', 'Всього записів', 'Розмір, МБ (макс.)', 'Заповнено, %', 'Історія, дн.', 'Режим', 'Стан') -RowClass { param($r) if ($r._off) { 'bad' } elseif ($r.'Стан' -eq 'Вікно не покрите') { 'bad' } elseif ($r._sev -in 'Високо', 'Середньо') { 'warn' } }) +
          (H3 'Показник / Значення') + (KV $kvObj)
     [void]$S.Append((Sec 'logs' '1.1 Стабільність надходження логів' $b -Open -Count @($lhRows | Where-Object { $_._off -or $_.'Стан' -ne 'OK' }).Count))

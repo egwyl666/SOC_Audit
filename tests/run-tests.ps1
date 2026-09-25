@@ -178,9 +178,10 @@ try {
         foreach ($g in $cnt) { $k = Get-Item -LiteralPath (Join-Path $g.PSPath 'Count') -ErrorAction SilentlyContinue; if (-not $k) { continue }
             foreach ($vn in $k.GetValueNames()) { try { $null = ConvertFrom-UserAssistData ($k.GetValue($vn)) } catch { $okUa = $false } } }
         Assert-True 'UserAssist поточного користувача читається без помилок' $okUa
-        $e24 = Get-LogEvents24h 'System' (Get-Date)
-        $cnt24 = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = (Get-Date).AddHours(-24) } -ErrorAction SilentlyContinue).Count
-        Assert-True ("Get-LogEvents24h System = {0}, прямий підрахунок = {1}" -f $e24, $cnt24) ($null -ne $e24 -and [math]::Abs([int64]$e24 - $cnt24) -le 5)
+        $now = Get-Date
+        $e24 = Get-LogEvents24h 'System' $now
+        $cnt24 = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $now.AddHours(-24); EndTime = $now } -ErrorAction SilentlyContinue).Count
+        Assert-True ("Get-LogEvents24h System = {0}, прямий підрахунок = {1}" -f $e24, $cnt24) ($null -ne $e24 -and [string]$e24 -notlike '≈*' -and [math]::Abs([int64]$e24 - $cnt24) -le 2)
     }
 
     Test-Group 'FILETIME'

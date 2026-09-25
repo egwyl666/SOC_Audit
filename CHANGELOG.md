@@ -19,7 +19,8 @@ Status: parser check and unit tests pass; Windows validation in CI; runs on DC01
 
 ### Added
 - Report section **1.1 "Стабільність надходження логів"**, opened by default:
-  - table: channel, events in the last 24 h (from the RecordId difference, without reading every event), total records,
+  - table: channel, events in the last 24 h (exact count by event time via EventLogReader; for channels with more
+    than 100 000 events a day — an estimate from the RecordId difference, marked "≈"), total records,
     max size, fill %, history days, mode, state;
   - disabled channels and channels that do not cover the window are highlighted;
   - numbers use thousands separators;
@@ -34,6 +35,8 @@ Status: parser check and unit tests pass; Windows validation in CI; runs on DC01
   `reg unload` failed. Amcache is now read with .NET `RegistryKey` and every key is closed explicitly.
 - Smoke test counted 0 rows for every CSV in Windows PowerShell 5.1 (`PSObject.Properties` has no `.Count` there).
 - Duplicate lines in collection notes.
+- Events per 24 h: the first version used only the RecordId difference; CI showed it can overcount (354 vs 329 on a
+  freshly booted VM whose clock was corrected, record order ≠ time order). Now counted exactly.
 
 ## [1.6.0] — 2026-09-25
 
