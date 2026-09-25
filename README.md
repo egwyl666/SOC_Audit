@@ -37,6 +37,24 @@ see `.gitattributes`). Copy-pasting from the GitHub page may drop the BOM.
 
 ## 2. How to run
 
+### Quick start: one command
+
+Open PowerShell **as Administrator** and paste one line. It downloads the latest script from `main`, prints its
+SHA256 and runs a full collection for the last 24 hours; the report opens when it finishes.
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24
+```
+
+For a real incident, add your IOCs and write the results to an external drive:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24 -NamePatterns '*evil*' -IocIPs '203.0.113.5' -OutRoot 'E:\SOC_Evidence'
+```
+
+> Note: without your own IOCs the script uses the test KMSAuto masks (a banner in the report says so). Record the
+> printed SHA256 in the ticket — it identifies the exact version that was run.
+
 ### 2.1 Via `-File` — recommended
 
 ```powershell
