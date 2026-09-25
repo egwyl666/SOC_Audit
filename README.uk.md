@@ -7,7 +7,7 @@
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207.x-5391FE?logo=powershell&logoColor=white)](#1-вимоги)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011%20%7C%20Server%202016--2025-0078D6?logo=windows&logoColor=white)](#1-вимоги)
 [![NIST SP 800-86](https://img.shields.io/badge/NIST-SP%20800--86-2E7D32)](https://csrc.nist.gov/pubs/sp/800/86/final)
-[![Version](https://img.shields.io/badge/version-1.1-informational)](soc-collect.ps1)
+[![Version](https://img.shields.io/badge/version-1.2-informational)](soc-collect.ps1)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#1-вимоги)
 
 [🇬🇧 English](README.md) · **🇺🇦 Українська**
@@ -16,7 +16,7 @@
 
 ---
 
-`soc-collect.ps1` — **SOC Live Response Collector v1.1**. Замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`
+`soc-collect.ps1` — **SOC Live Response Collector v1.2**. Замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`
 одним файлом: збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти,
 корелює їх, будує timeline і автономний HTML-звіт — з chain of custody та SHA256-маніфестом.
 Порядок і принципи роботи узгоджено з **NIST SP 800-86**.
@@ -90,7 +90,8 @@ powershell.exe -ExecutionPolicy Bypass -File C:\1\soc-collect.ps1 -CaseId INC-09
 
 > [!NOTE]
 > Перевірено: v1.0 — повний прогін на Windows 11 / PowerShell 5.1.26100, **34/34 кроки без помилок**.
-> v1.1 пройшла перевірку парсером і unit-тести змінених функцій; повний прогін на Windows ще попереду — див. [CHANGELOG](CHANGELOG.md).
+> v1.1 — повний прогін на контролері домену (Windows Server, PS 5.1), 64- і 32-біт: 35/35 кроків OK; знахідки цього прогону — основа виправлень v1.2.
+> v1.2 пройшла перевірку парсером і unit-тести змінених функцій; повторний прогін на Windows — попереду, див. [CHANGELOG](CHANGELOG.md).
 
 > [!TIP]
 > Завантажуйте скрипт через **Download raw file** або `git clone` — репозиторій зберігає файл побайтно
@@ -319,7 +320,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 | Кодування | UTF-8 з BOM — 5.1 читає кирилицю коректно |
 | Модулі | Лише вбудовані: NetSecurity, NetTCPIP, ScheduledTasks, Defender, LocalAccounts, CimCmdlets |
 | Локалізація ОС | Дані з журналів беруться з XML (не з локалізованого тексту); `auditpol` — розбір EN/RU/UA |
-| Перевірено | v1.0: Windows 11 + PS 5.1.26100, 34/34 кроки OK; v1.1: парсер + unit-тести, прогін на Windows — попереду |
+| Перевірено | v1.0: Windows 11 + PS 5.1.26100, 34/34 OK; v1.1: контролер домену, PS 5.1 64/32-біт, 35/35 OK; v1.2: парсер + unit-тести, повторний прогін — попереду |
 
 ---
 
@@ -329,7 +330,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 |---|---|
 | `ПОМИЛКА: потрібен PowerShell 5.1+` / помилка `#requires` | Встановіть WMF 5.1 або запускайте через `powershell.exe` (5.1) / `pwsh.exe` (7.x) |
 | `ПОМИЛКА: LanguageMode = ConstrainedLanguage` | PowerShell обмежено AppLocker/WDAC; запускайте з дозволеного адмін-контексту або додайте скрипт у виключення |
-| Попередження про 32-бітний PowerShell | Запускайте `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, а не з `SysWOW64` |
+| Попередження про 32-бітний PowerShell | При запуску через `-File` скрипт сам перезапускається в 64-бітному PowerShell (`Sysnative`). Інакше (scriptblock, pwsh x86) запускайте `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` |
 | `не може бути завантажений, оскільки виконання сценаріїв вимкнено` | Додайте `-ExecutionPolicy Bypass` або `Set-ExecutionPolicy -Scope Process Bypass` |
 | Кракозябри замість кирилиці | Файл перезбережено без BOM. Збережіть як **UTF-8 with BOM** або запускайте через scriptblock з `-Encoding UTF8` |
 | `Не вдається перетворити значення … на тип System.DateTime` | Дату задано не в ISO. Використовуйте `'2026-09-22 00:00'` |

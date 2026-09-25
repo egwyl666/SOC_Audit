@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.1 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.2 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -111,8 +111,29 @@ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     Write-Host ("ПОМИЛКА: LanguageMode = {0}. Потрібен FullLanguage (обмеження AppLocker/WDAC/__PSLockdownPolicy) — .NET-виклики скрипта заблоковані." -f $ExecutionContext.SessionState.LanguageMode) -ForegroundColor Red
     exit 2
 }
+$Relaunched = ($env:SOC_COLLECT_RELAUNCHED -eq '1')
+if ($Relaunched) { Remove-Item Env:SOC_COLLECT_RELAUNCHED -ErrorAction SilentlyContinue; $EnvWarnings += 'Скрипт автоматично перезапущено з 32-бітного PowerShell у 64-бітний (Sysnative), щоб уникнути перенаправлення WOW64.' }
 if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
-    $EnvWarnings += 'Запущено 32-бітний PowerShell на 64-бітній ОС: WOW64 перенаправляє System32 і частину реєстру — дані можуть бути неповними. Запускайте %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe.'
+    # WOW64 підміняє System32 і HKLM\SOFTWARE — на тесті це дало порожній Winlogon\Userinit і «відсутній» lsass.exe.
+    # При запуску з файлу перезапускаємось у 64-бітному powershell.exe з тими самими параметрами.
+    $native = Join-Path $env:SystemRoot 'Sysnative\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not $Relaunched -and $PSCommandPath -and $PSVersionTable.PSEdition -ne 'Core' -and (Test-Path -LiteralPath $native)) {
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
+        foreach ($kv in $PSBoundParameters.GetEnumerator()) {
+            $v = $kv.Value
+            if ($null -eq $v -or ($v -is [string] -and -not $v) -or ($v -is [array] -and -not @($v).Count)) { continue }   # порожні аргументи PS 5.1 не передає нативним exe
+            if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $argList += "-$($kv.Key)" }; continue }
+            $argList += "-$($kv.Key)"
+            if ($v -is [datetime]) { $argList += $v.ToString('yyyy-MM-dd HH:mm:ss') }
+            elseif ($v -is [array]) { $argList += (@($v) -join ',') }   # -File: списки через кому розбирає Split-ListParam
+            else { $argList += [string]$v }
+        }
+        Write-Host "32-бітний PowerShell на 64-бітній ОС — перезапуск у 64-бітному: $native" -ForegroundColor Yellow
+        $env:SOC_COLLECT_RELAUNCHED = '1'
+        & $native @argList
+        exit $LASTEXITCODE
+    }
+    $EnvWarnings += 'Запущено 32-бітний PowerShell на 64-бітній ОС: WOW64 перенаправляє System32 і частину реєстру — дані можуть бути неповними (напр. Winlogon, «відсутні» бінарники служб). Запускайте %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe.'
 }
 if ($psv.Major -eq 5 -and $psv.Minor -eq 1 -and $psv.Build -lt 14393) {
     $EnvWarnings += ("PowerShell {0} (WMF 5.1 на старій ОС): частина модулів (LocalAccounts, NetTCPIP) може бути відсутня — кроки позначаться як ПОМИЛКА." -f $psv)
@@ -131,7 +152,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.1'
+$ToolVersion = '1.2'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -368,7 +389,23 @@ function Get-PathClass {
     return 'Нестандартний'
 }
 
+function Resolve-BareExe {   # 'sc.exe' / 'powershell.exe' без шляху -> повний шлях (як його знайде Windows), інакше без змін
+    param([string]$exe)
+    if (-not $exe -or $exe.Contains('\') -or $exe.Contains('/')) { return $exe }
+    $w = $env:SystemRoot
+    foreach ($d in @("$w\System32", "$w", "$w\System32\wbem", "$w\System32\WindowsPowerShell\v1.0", "$w\SysWOW64")) {
+        foreach ($cand in @((Join-Path $d $exe), (Join-Path $d "$exe.exe"))) {
+            if (Test-Path -LiteralPath $cand -PathType Leaf) { return $cand }
+        }
+    }
+    return $exe
+}
 function Get-ExeFromCmd {
+    param([string]$cmd)
+    if (-not $cmd) { return '' }
+    return (Resolve-BareExe (Get-ExeFromCmdRaw $cmd))
+}
+function Get-ExeFromCmdRaw {
     param([string]$cmd)
     if (-not $cmd) { return '' }
     $c = [Environment]::ExpandEnvironmentVariables($cmd.Trim())
@@ -397,6 +434,16 @@ function Get-BinInfo {   # hash + підпис виконуваного файл
     }
     $BinCache[$k] = $o
     return $o
+}
+
+function Get-EffPathClass {   # як Get-PathClass, але підпапки C:\Windows з валідним підписом Microsoft (ADWS, AzureArcSetup…) — не «Нестандартний»
+    param([string]$Path)
+    $cls = Get-PathClass $Path
+    if ($cls -ne 'Нестандартний' -or -not $Path) { return $cls }
+    if (-not $Path.StartsWith($env:SystemRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return $cls }
+    $bi = Get-BinInfo $Path
+    if ($bi -and $bi.Exists -and $bi.Sig -eq 'Valid' -and $bi.Signer -match '^Microsoft ') { return 'Windows (підпис Microsoft)' }
+    return $cls   # непідписане в C:\Windows\<папка> (як KMSAutoS) лишається підозрілим
 }
 
 function Get-FileEvidence {   # MAC ДО читання -> hash/підпис/Zone.Identifier -> MAC ПІСЛЯ
@@ -440,6 +487,20 @@ function Get-FileEvidence {   # MAC ДО читання -> hash/підпис/Zon
     return [pscustomobject]$o
 }
 
+function Get-SharedHash {   # SHA256 файлу, який інший процес тримає відкритим на запис (pfirewall.log, History відкритого браузера)
+    param([string]$Path)
+    $fs = $null; $sha = $null
+    try {
+        $fs  = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        $sha = [Security.Cryptography.SHA256]::Create()
+        return ([BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '')
+    } catch { return '' } finally { if ($fs) { $fs.Close() }; if ($sha) { $sha.Dispose() } }
+}
+function Get-SourceHash {   # спершу звичайний Get-FileHash, для заблокованих — спільне читання
+    param([string]$Path)
+    try { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash } catch { return (Get-SharedHash $Path) }
+}
+
 function Copy-Evidence {   # NIST: hash джерела ДО -> копія -> hash копії -> hash джерела ПІСЛЯ
     param([string]$Source, [string]$RelDir, [switch]$ActiveFile, [string]$Prefix = '')
     $destDir = Join-Path $CaseDir $RelDir
@@ -449,7 +510,7 @@ function Copy-Evidence {   # NIST: hash джерела ДО -> копія -> has
     $k = 1
     while (Test-Path -LiteralPath $dest) { $dest = Join-Path $destDir ("{0}_{1}" -f $k, $name); $k++ }
     $pre = ''; $post = ''; $dst = ''; $method = 'Copy-Item'; $err = ''; $copied = $false
-    try { $pre = (Get-FileHash -LiteralPath $Source -Algorithm SHA256 -ErrorAction Stop).Hash } catch {}
+    $pre = Get-SourceHash $Source
     try { Copy-Item -LiteralPath $Source -Destination $dest -Force -ErrorAction Stop; $copied = $true }
     catch {
         try {
@@ -461,7 +522,7 @@ function Copy-Evidence {   # NIST: hash джерела ДО -> копія -> has
     }
     if ($copied) {
         try { $dst  = (Get-FileHash -LiteralPath $dest -Algorithm SHA256 -ErrorAction Stop).Hash } catch {}
-        try { $post = (Get-FileHash -LiteralPath $Source -Algorithm SHA256 -ErrorAction Stop).Hash } catch {}
+        $post = Get-SourceHash $Source
     }
     $status = 'CHECK'
     if (-not $copied) { $status = 'НЕ СКОПІЙОВАНО' }
@@ -651,7 +712,7 @@ $TaskInterpreters = @('powershell.exe','pwsh.exe','cmd.exe','mshta.exe','wscript
 function Get-MsTaskSuspicion {   # чому задача під \Microsoft\ НЕ схожа на штатну ('' = штатна)
     param([string]$Exe, [string]$Actions, [string]$Author, [string]$Actor = '')
     $r = @()
-    $cls = Get-PathClass $Exe
+    $cls = Get-EffPathClass $Exe
     if ($Exe -and $cls -in @('Нестандартний', 'Користувацький/тимчасовий')) { $r += "дія: $cls" }
     $why = Get-ExecReason $Exe $Actions ''
     if ($why -match 'IOC|Підозрілі') { $r += $why }
@@ -736,6 +797,9 @@ Invoke-Step "0. Pre-flight: версія інструмента, час, про�
     Save-Csv $D.Profiles '02_system\user_profiles.csv'
 
 
+    # Роль хоста: 1 = робоча станція, 2 = контролер домену, 3 = сервер (впливає на евристики мережевого трафіку)
+    $D.ProductType = 0; if ($os) { $D.ProductType = [int]$os.ProductType }
+    $D.IsDC = ($D.ProductType -eq 2)
     $isVm = $false
     if ($cs -and ("$($cs.Manufacturer) $($cs.Model)" -match '(?i)vmware|virtual|kvm|qemu|hyper-v|xen|virtualbox|parallels')) { $isVm = $true }
     $D.SysInfo = [pscustomobject][ordered]@{
@@ -746,6 +810,7 @@ Invoke-Step "0. Pre-flight: версія інструмента, час, про�
         'Останнє завантаження (UTC)' = $(if ($os) { U $os.LastBootUpTime } else { '' })
         'Виробник / модель'          = $(if ($cs) { "$($cs.Manufacturer) / $($cs.Model)" } else { '' })
         'Віртуальна машина'          = $isVm
+        'Роль хоста'                 = $(switch ($D.ProductType) { 1 { 'Робоча станція' } 2 { 'Контролер домену' } 3 { 'Сервер' } default { 'невідомо' } })
         'Часовий пояс'               = $(if ($tz) { "$($tz.Id) (UTC$($tz.BaseUtcOffset))" } else { '' })
         'Джерело часу (w32tm)'       = $ntp
         'Час старту збору (локальний)' = $RunStart.ToString('yyyy-MM-dd HH:mm:ss')
@@ -766,15 +831,23 @@ Invoke-Step "0. Pre-flight: версія інструмента, час, про�
 }
 
 # ════════════════════════════════════ 1. ВОЛАТИЛЬНІ ДАНІ (NIST 5.1.2 — першими) ════════════════════════════════════
-Invoke-Step "1.1 Швидкий знімок: мережеві з'єднання, потім процеси (без hash — щоб не втратити летючі дані)" {
+Invoke-Step "1.1 Швидкий знімок: netstat, мережеві з'єднання, процеси (без hash — щоб не втратити летючі дані)" {
     # NIST 5.1.2: спочатку найлетючіше. Збагачення (власник, hash, підпис) — окремими кроками нижче, по знімку.
     $t0 = (Get-Date).ToUniversalTime()
-    $errs = @()   # збій одного джерела не повинен зірвати знімок інших
+    $errs = @(); $tm = @()   # збій одного джерела не повинен зірвати знімок інших; час кожного — у custody
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    # netstat -ano — найшвидше джерело (нативний, без завантаження модулів): фіксує з'єднання за частки секунди
+    $ns = ''; try { $ns = ((& netstat.exe -ano 2>&1) | Out-String) } catch { $errs += "netstat: $($_.Exception.Message)" }
+    $tm += ('netstat {0:N1}s' -f $sw.Elapsed.TotalSeconds); $sw.Restart()
     try { $D.TcpRaw  = Arr (Get-NetTCPConnection -ErrorAction Stop) } catch { $errs += "TCP: $($_.Exception.Message)" }
+    $tm += ('TCP {0:N1}s' -f $sw.Elapsed.TotalSeconds); $sw.Restart()
     try { $D.UdpRaw  = Arr (Get-NetUDPEndpoint -ErrorAction Stop) } catch { $errs += "UDP: $($_.Exception.Message)" }
+    $tm += ('UDP {0:N1}s' -f $sw.Elapsed.TotalSeconds); $sw.Restart()
     try { $D.ProcRaw = Arr (Get-CimInstance Win32_Process -ErrorAction Stop) } catch { $errs += "Процеси: $($_.Exception.Message)" }
+    $tm += ('процеси {0:N1}s' -f $sw.Elapsed.TotalSeconds)
     $D.SnapshotUtc = $t0.ToString('yyyy-MM-dd HH:mm:ss.fff') + 'Z'
-    Add-Custody 'VOLATILE_SNAPSHOT' 'TCP/UDP/процеси' $(if ($errs) { 'PARTIAL' } else { 'OK' }) ("TCP {0}, UDP {1}, процесів {2}; знято за {3:N1} с" -f @($D.TcpRaw).Count, @($D.UdpRaw).Count, @($D.ProcRaw).Count, ((Get-Date).ToUniversalTime() - $t0).TotalSeconds)
+    Save-Text ("# netstat -ano, знято {0}`r`n{1}" -f $D.SnapshotUtc, $ns) '01_volatile\netstat_ano.txt'
+    Add-Custody 'VOLATILE_SNAPSHOT' 'netstat/TCP/UDP/процеси' $(if ($errs) { 'PARTIAL' } else { 'OK' }) ("TCP {0}, UDP {1}, процесів {2}; {3}" -f @($D.TcpRaw).Count, @($D.UdpRaw).Count, @($D.ProcRaw).Count, ($tm -join ', '))
     if ($errs) { throw ($errs -join ' | ') }
 }
 
@@ -813,7 +886,7 @@ Invoke-Step "1.4 Процеси зі знімка: власник, батькі�
         try { $o = Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop; if ($o.User) { $owner = "$($o.Domain)\$($o.User)" } } catch {}
         $bi = $null; if ($p.ExecutablePath) { $bi = Get-BinInfo $p.ExecutablePath }
         $sha = ''; $sig = ''; $signer = ''; $cls = ''
-        if ($bi) { $sha = $bi.SHA256; $sig = $bi.Sig; $signer = $bi.Signer; $cls = $bi.Class }
+        if ($bi) { $sha = $bi.SHA256; $sig = $bi.Sig; $signer = $bi.Signer; $cls = Get-EffPathClass $p.ExecutablePath }
         $flag = @()
         if ($sha -and $IocSha256 -contains $sha) { $flag += 'IOC HASH' }
         if ($sig -and $sig -ne 'Valid' -and $cls -ne 'Системний') { $flag += "Підпис: $sig" }
@@ -885,7 +958,7 @@ Invoke-Step "2.2 Служби (усі) + hash/підпис бінарників,
     $rows = foreach ($s in @(Get-CimInstance Win32_Service -ErrorAction Stop)) {
         $exe = Get-ExeFromCmd $s.PathName
         $bi = Get-BinInfo $exe
-        $cls = Get-PathClass $exe
+        $cls = Get-EffPathClass $exe
         $flag = @()
         if ($bi -and $exe -and -not $bi.Exists) { $flag += 'Бінарник відсутній на диску' }
         if ($bi -and $bi.Exists -and $bi.Sig -ne 'Valid') { $flag += "Підпис: $($bi.Sig)" }
@@ -910,8 +983,8 @@ Invoke-Step "2.3 Задачі планувальника: автор (з XML з�
         $isMs = $t.TaskPath -like '\Microsoft\*'
         $acts = @($t.Actions | ForEach-Object { if ($_.Execute) { ("{0} {1}" -f $_.Execute, $_.Arguments).Trim() } elseif ($_.ClassId) { "COM:$($_.ClassId)" } })
         $firstExe = ''
-        foreach ($a in @($t.Actions)) { if ($a.Execute) { $firstExe = [Environment]::ExpandEnvironmentVariables(([string]$a.Execute).Trim('"')); break } }
-        $cls = Get-PathClass $firstExe
+        foreach ($a in @($t.Actions)) { if ($a.Execute) { $firstExe = Resolve-BareExe ([Environment]::ExpandEnvironmentVariables(([string]$a.Execute).Trim('"'))); break } }
+        $cls = Get-EffPathClass $firstExe
         # \Microsoft\* пропускаємо лише якщо задача виглядає штатною (маскування під системну — класичний прийом)
         $msWhy = ''
         if ($isMs) { $msWhy = Get-MsTaskSuspicion $firstExe ($acts -join ' ') ([string]$t.Author); if (-not $msWhy) { continue } }
@@ -960,7 +1033,7 @@ Invoke-Step "2.4 Автозапуск: Run/RunOnce, Winlogon, IFEO, Startup, WMI
             if ($p.Name -like 'PS*') { continue }
             $exe = Get-ExeFromCmd ([string]$p.Value); $bi = Get-BinInfo $exe
             $rows.Add([pscustomobject]@{ Type = 'Run-ключ'; Location = $k; Name = $p.Name; Command = [string]$p.Value; Binary = $exe
-                Signature = $(if ($bi) { $bi.Sig } else { '' }); PathClass = (Get-PathClass $exe); Match = (Test-KwMatch ("{0} {1}" -f $p.Name, $p.Value)) })
+                Signature = $(if ($bi) { $bi.Sig } else { '' }); PathClass = (Get-EffPathClass $exe); Match = (Test-KwMatch ("{0} {1}" -f $p.Name, $p.Value)) })
         }
     }
     $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
@@ -1082,7 +1155,7 @@ Invoke-Step "2.7 Firewall: профілі, налаштування логува
         $flag = @()
         if (Test-KwMatch "$($r.Name) $($r.DisplayName) $prog") { $flag += 'Збіг з маскою IOC' }
         if ("$lp,$rp" -match '(^|,)1688(,|$)') { $flag += 'Порт 1688 (KMS)' }
-        if ($prog -and $prog -ne 'Any' -and (Get-PathClass $prog) -in @('Нестандартний', 'Користувацький/тимчасовий')) { $flag += 'Програма в нестандартному шляху' }
+        if ($prog -and $prog -notin @('Any', 'System') -and (Get-EffPathClass $prog) -in @('Нестандартний', 'Користувацький/тимчасовий')) { $flag += 'Програма в нестандартному шляху' }
         [pscustomobject]@{ Name = $r.Name; DisplayName = $r.DisplayName; Direction = [string]$r.Direction; Action = [string]$r.Action; Profile = [string]$r.Profile
             Protocol = $proto; LocalPort = $lp; RemotePort = $rp; RemoteAddress = $ra; Program = $prog; Group = $r.Group; Flags = ($flag -join '; ') }
     }
@@ -1191,8 +1264,13 @@ Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776,
     Save-Csv $D.Ev4625 '03_eventlogs\security_4625_failed_logons.csv'
 
     $sU = $Since.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z'); $uU = $Until.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z')
-    $xp = "*[System[(EventID=4624) and TimeCreated[@SystemTime>='$sU' and @SystemTime<='$uU']]] and *[EventData[Data[@Name='LogonType']='2' or Data[@Name='LogonType']='3' or Data[@Name='LogonType']='7' or Data[@Name='LogonType']='10' or Data[@Name='LogonType']='11']]"
-    $rows = foreach ($e in (Get-EvXPath 'Security' $xp '4624 типи 2/3/7/10/11')) {
+    # Два окремі запити зі своїм лімітом: на DC/файл-сервері мережеві входи (тип 3) інакше витісняють з вибірки
+    # інтерактивні та RDP-входи. Службові SID (SYSTEM, LOCAL/NETWORK SERVICE, ANONYMOUS) відсікаються вже в XPath.
+    $xpBase = "*[System[(EventID=4624) and TimeCreated[@SystemTime>='$sU' and @SystemTime<='$uU']]] and *[EventData[Data[@Name='TargetUserSid']!='S-1-5-18' and Data[@Name='TargetUserSid']!='S-1-5-19' and Data[@Name='TargetUserSid']!='S-1-5-20' and Data[@Name='TargetUserSid']!='S-1-5-7']]"
+    $xpInter = $xpBase + " and *[EventData[Data[@Name='LogonType']='2' or Data[@Name='LogonType']='7' or Data[@Name='LogonType']='10' or Data[@Name='LogonType']='11']]"
+    $xpNet   = $xpBase + " and *[EventData[Data[@Name='LogonType']='3']]"
+    $ev4624 = @(Get-EvXPath 'Security' $xpInter '4624 типи 2/7/10/11 — інтерактивні/RDP') + @(Get-EvXPath 'Security' $xpNet '4624 тип 3 — мережеві')
+    $rows = foreach ($e in $ev4624) {
         $d = Get-EvData $e
         $sid = [string]$d['TargetUserSid']
         if ($sid -notmatch '^S-1-5-21-|^S-1-12-' -or ([string]$d['TargetUserName']).EndsWith('$')) { continue }
@@ -1421,10 +1499,15 @@ Invoke-Step "3.8 PowerShell 4104 (Script Block Logging) — підозрілі �
 
 # ════════════════════════════════════ 4. FIREWALL-ЛОГ (pfirewall.log) ════════════════════════════════════
 Invoke-Step "4. pfirewall.log: зведення по портах і джерелах, allow/drop, first/last, IOC IP" {
+    # Шляхи з профілів різняться регістром (system32 / System32) — без дедупу той самий лог читався двічі і лічильники подвоювались
     $files = New-Object System.Collections.Generic.List[string]
-    foreach ($p in @($D.FwProfiles)) { if ($p.LogFile -and -not $files.Contains($p.LogFile)) { $files.Add($p.LogFile) } }
-    $def = Join-Path $env:SystemRoot 'System32\LogFiles\Firewall\pfirewall.log'
-    if (-not $files.Contains($def)) { $files.Add($def) }
+    $seenFw = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $cands = @(@($D.FwProfiles) | ForEach-Object { $_.LogFile }) + @(Join-Path $env:SystemRoot 'System32\LogFiles\Firewall\pfirewall.log')
+    foreach ($c in $cands) {
+        if (-not $c) { continue }
+        $full = $c; try { $full = [IO.Path]::GetFullPath($c) } catch {}
+        if ($seenFw.Add($full)) { $files.Add($full) }
+    }
     $all = @(); foreach ($f in $files) { $all += $f; $all += ($f + '.old') }
     $own = @($D.OwnIPs)
     $byPort = @{}; $bySrc = @{}
@@ -1488,7 +1571,9 @@ Invoke-Step "4. pfirewall.log: зведення по портах і джере�
         if (-not $isOwn) {
             if (Test-IocIPEq $ip) { $h += 'IOC IP' }
             if ($v.Icmp -ge 20) { $h += ("ICMP ×{0} — можлива розвідка (ping sweep)" -f $v.Icmp) }
-            if (@($v.Ports | Where-Object { $_ -in '3389', '445', '139', '135', '5985', '5986', '22' }).Count -gt 0) { $h += 'Звернення до RDP/SMB/RPC/WinRM/SSH' }
+            if (@($v.Ports | Where-Object { $_ -in '3389', '5985', '5986', '22' }).Count -gt 0) { $h += 'Звернення до RDP/WinRM/SSH' }
+            # На контролері домену SMB/RPC з внутрішніх адрес без DROP — штатний трафік клієнтів домену (GPO, SYSVOL, реплікація)
+            if (@($v.Ports | Where-Object { $_ -in '445', '139', '135' }).Count -gt 0 -and -not ($D.IsDC -and (Test-PrivateIP $ip) -and $v.Drop -eq 0)) { $h += 'Звернення до SMB/RPC' }
             if ($v.Drop -ge 20) { $h += ("Багато DROP ({0})" -f $v.Drop) }
             if ($v.Ports.Count -ge 15) { $h += ("Багато портів ({0}) — схоже на сканування" -f $v.Ports.Count) }
         }

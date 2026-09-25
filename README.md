@@ -7,7 +7,7 @@
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207.x-5391FE?logo=powershell&logoColor=white)](#1-requirements)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011%20%7C%20Server%202016--2025-0078D6?logo=windows&logoColor=white)](#1-requirements)
 [![NIST SP 800-86](https://img.shields.io/badge/NIST-SP%20800--86-2E7D32)](https://csrc.nist.gov/pubs/sp/800/86/final)
-[![Version](https://img.shields.io/badge/version-1.1-informational)](soc-collect.ps1)
+[![Version](https://img.shields.io/badge/version-1.2-informational)](soc-collect.ps1)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#1-requirements)
 
 **🇬🇧 English** · [🇺🇦 Українська](README.uk.md)
@@ -16,7 +16,7 @@
 
 ---
 
-`soc-collect.ps1` — **SOC Live Response Collector v1.1**. It replaces the old main audit + `fwlog.ps1` +
+`soc-collect.ps1` — **SOC Live Response Collector v1.2**. It replaces the old main audit + `fwlog.ps1` +
 `filesinter.ps1` with one file: it collects volatile data, persistence, event logs, `pfirewall.log` and file
 artifacts, correlates them, and builds a timeline and a self-contained HTML report — with chain of custody and
 a SHA256 manifest. Order of collection and handling principles follow **NIST SP 800-86**.
@@ -93,7 +93,8 @@ Then open `C:\SOC_Evidence\<CaseId>_<HOST>_<timestamp>Z\report.html` in a browse
 
 > [!NOTE]
 > Tested: v1.0 — full run on Windows 11 / PowerShell 5.1.26100, **34/34 steps without errors**.
-> v1.1 passed a parser check and unit tests of the changed functions; a full run on Windows is still pending — see [CHANGELOG](CHANGELOG.md).
+> v1.1 — full run on a domain controller (Windows Server, PS 5.1), 64- and 32-bit: 35/35 steps OK; its findings drove the fixes in v1.2.
+> v1.2 passed a parser check and unit tests of the changed functions; the Windows re-run is pending — see [CHANGELOG](CHANGELOG.md).
 
 > [!TIP]
 > Get the script via **Download raw file** or `git clone` — the repository stores it byte-for-byte
@@ -322,7 +323,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 | Encoding | UTF-8 with BOM — 5.1 reads Cyrillic correctly |
 | Modules | Built-in only: NetSecurity, NetTCPIP, ScheduledTasks, Defender, LocalAccounts, CimCmdlets |
 | OS localization | Event data is read from XML (not localized text); `auditpol` parsing supports EN/RU/UA |
-| Tested | v1.0: Windows 11 + PS 5.1.26100, 34/34 steps OK; v1.1: parser + unit tests, Windows run pending |
+| Tested | v1.0: Windows 11 + PS 5.1.26100, 34/34 OK; v1.1: domain controller, PS 5.1 64/32-bit, 35/35 OK; v1.2: parser + unit tests, Windows re-run pending |
 
 ---
 
@@ -332,7 +333,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 |---|---|
 | `ПОМИЛКА: потрібен PowerShell 5.1+` / `The script … cannot be run because it contained a "#requires" statement` | Install WMF 5.1 or run via `powershell.exe` (5.1) / `pwsh.exe` (7.x) |
 | `ПОМИЛКА: LanguageMode = ConstrainedLanguage` | AppLocker/WDAC restricts PowerShell; run from an allowed admin context or whitelist the script |
-| Warning about 32-bit PowerShell | Run `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, not the `SysWOW64` one |
+| Warning about 32-bit PowerShell | Launched via `-File`, the script re-launches itself in 64-bit PowerShell (`Sysnative`) automatically. Otherwise (scriptblock, pwsh x86) run `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` |
 | `cannot be loaded because running scripts is disabled` | Add `-ExecutionPolicy Bypass` or run `Set-ExecutionPolicy -Scope Process Bypass` |
 | Garbled Cyrillic | The file was re-saved without BOM. Save as **UTF-8 with BOM** or run via scriptblock with `-Encoding UTF8` |
 | `Cannot convert value … to type System.DateTime` | Date isn't ISO. Use `'2026-09-22 00:00'` |

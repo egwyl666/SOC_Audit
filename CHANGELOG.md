@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.2] — 2026-09-25
+
+Driven by the v1.1 test run on a domain controller (64- and 32-bit). Status: parser check and unit tests passed;
+**Windows re-run pending**.
+
+### Fixed
+- `pfirewall.log` was parsed and copied twice when firewall profiles spelled the path with different case
+  (`system32` / `System32`) — ALLOW/DROP counters and per-source totals were doubled. Paths are now de-duplicated
+  case-insensitively.
+- Bare executable names in task actions and command lines (`sc.exe`, `powershell.exe`, `BthUdTask.exe`) were
+  classified as "non-standard path" → false High flags on built-in `\Microsoft\` tasks (regression from 1.1) and on
+  third-party tasks. New `Resolve-BareExe` resolves them via System32 / Windows / wbem / WindowsPowerShell / SysWOW64.
+- Firewall rules whose program is `System` (kernel) were flagged "program in non-standard path" (69 false flags on DC).
+- Microsoft-signed binaries in `C:\Windows\<subfolder>` (ADWS, AzureArcSetup…) are no longer flagged for location;
+  unsigned files there (e.g. `C:\Windows\KMSAutoS`) still are.
+- Locked sources (active `pfirewall.log`, History of a running browser) got `COPY-ONLY`: the hash before/after is now
+  computed via a shared-read stream, so copies are verified or reported as `SOURCE_CHANGED`.
+
+### Changed
+- 4624 is queried in two parts with separate limits — interactive/RDP (2/7/10/11) and network (3) — and service SIDs
+  (S-1-5-18/19/20/7) are excluded in XPath, so network logons on a DC no longer push RDP/interactive logons out of the sample.
+- 32-bit PowerShell on 64-bit Windows: when started with `-File`, the script re-launches itself in 64-bit PowerShell
+  (`Sysnative`) with the same parameters (the test showed WOW64 distortions: empty `Winlogon\Userinit`,
+  "missing" `lsass.exe`). Otherwise it warns as before.
+- Step 1.1 captures `netstat -ano` first (`01_volatile\netstat_ano.txt`) and records the time of each source in custody.
+- Host role (workstation / DC / server) is recorded; on a DC, SMB/RPC from internal addresses without drops is no longer
+  a pfirewall.log heuristic hit. RDP/WinRM/SSH and SMB/RPC are now separate heuristics.
+
 ## [1.1] — 2026-09-25
 
 Status: parser check (PowerShell 7.4) and unit tests of the changed functions passed; **a full run on Windows / PS 5.1 is still pending**.
