@@ -2,7 +2,7 @@
 
 [English](README.md) | Українська
 
-**SOC Live Response Collector v1.4.4** — один скрипт збору доказів і первинного аналізу Windows-хоста
+**SOC Live Response Collector v1.5.0** — один скрипт збору доказів і первинного аналізу Windows-хоста
 (замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`). Узгоджено з **NIST SP 800-86**.
 
 Скрипт збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти, перевіряє
@@ -284,3 +284,24 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 - Ознаки атак на AD видно лише тоді, коли відповідні підкатегорії аудиту ввімкнені (скрипт це перевіряє і пише у звіт).
 - Рекомендовані розміри журналів — орієнтовні (для навантажених серверів / DC Security ≥ 4 ГБ).
 - IP-адреса у кореляції — **кандидат**, не доказ ідентичності (NIST 6.4.4).
+
+---
+
+## 10. Тести та CI
+
+| Файл | Що перевіряє |
+|---|---|
+| `tests/run-tests.ps1` | Unit-тести без зовнішніх модулів: IOC IP, розбір `auditpol` (EN/RU/UA), ознаки атак на AD, пошук рядків у БД, hash відкритих файлів, збіг імен функцій з алиасами, крок 2.9 для станції та DC |
+| `tests/check-encoding.ps1` | Усі `*.ps1` — UTF-8 з BOM і CRLF |
+| `tests/smoke.ps1` | Повний запуск збору окремим процесом: звіт, маніфест, жодного кроку зі статусом `ПОМИЛКА` |
+
+Запуск локально (Windows, адмінська консоль):
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\tests\run-tests.ps1
+powershell.exe -ExecutionPolicy Bypass -File .\tests\smoke.ps1 -OutRoot C:\SOC_Smoke
+```
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) на кожен push і pull request запускає на `windows-latest`:
+перевірку кодування, PSScriptAnalyzer (помилки та сумісність синтаксису з PowerShell 5.1), unit-тести у
+Windows PowerShell 5.1 і PowerShell 7, smoke-прогін. Звіт smoke-прогону доступний як артефакт збірки.

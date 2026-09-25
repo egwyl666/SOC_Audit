@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.4.4 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.5.0 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -153,7 +153,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.4.4'
+$ToolVersion = '1.5.0'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -754,7 +754,8 @@ Write-Host ("Справа: {0} | Хост: {1} | Оператор: {2}" -f $Case
 Write-Host ("Вікно подій: {0} → {1} (локальний час)" -f $Since.ToString('yyyy-MM-dd HH:mm:ss'), $Until.ToString('yyyy-MM-dd HH:mm:ss'))
 Write-Host ("Результати: {0}" -f $CaseDir)
 # Тестові IOC за замовчуванням (кейс KMSAuto): якщо жоден IOC-параметр не передано, збіги з масками — шум, а не знахідки
-$UsingDefaultIoc = -not (@('NamePatterns', 'IocSha256', 'IocIPs', 'KnownPaths') | Where-Object { $PSBoundParameters.ContainsKey($_) })
+$ScriptBound = $PSBoundParameters   # копія посилання: усередині Where-Object {} $PSBoundParameters може належати іншій області
+$UsingDefaultIoc = -not (@('NamePatterns', 'IocSha256', 'IocIPs', 'KnownPaths') | Where-Object { $ScriptBound.ContainsKey($_) })
 if ($UsingDefaultIoc) {
     Write-Host "УВАГА: IOC не задано — використано тестові IOC за замовчуванням (KMSAuto). Збіги з масками знижено до «Інфо». Для справи передайте -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths." -ForegroundColor Yellow
     Add-Note 'Використано тестові IOC за замовчуванням (кейс KMSAuto): жоден з -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths не передано. Прапорці, що спираються лише на збіг з маскою, знижено до «Інфо».'

@@ -2,7 +2,7 @@
 
 English | [Українська](README.uk.md)
 
-**SOC Live Response Collector v1.4.4** — a single script for evidence collection and first-pass analysis of a Windows host
+**SOC Live Response Collector v1.5.0** — a single script for evidence collection and first-pass analysis of a Windows host
 (replaces the old main audit + `fwlog.ps1` + `filesinter.ps1`). Aligned with **NIST SP 800-86**.
 
 The script collects volatile data, persistence, event logs, `pfirewall.log` and file artifacts, checks security
@@ -286,3 +286,24 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 - AD attack signs are visible only when the corresponding audit subcategories are enabled (the script checks this and reports it).
 - Recommended log sizes are approximate (for busy servers / DCs, Security ≥ 4 GB).
 - An IP address in correlation is a **candidate**, not proof of identity (NIST 6.4.4).
+
+---
+
+## 10. Tests and CI
+
+| File | What it checks |
+|---|---|
+| `tests/run-tests.ps1` | Unit tests without external modules: IOC IPs, `auditpol` parsing (EN/RU/UA), AD attack signs, string search in databases, hashing of open files, function names vs built-in aliases, step 2.9 for a workstation and a DC |
+| `tests/check-encoding.ps1` | Every `*.ps1` is UTF-8 with BOM and CRLF |
+| `tests/smoke.ps1` | Full collection run in a separate process: report, manifest, no step with status `ПОМИЛКА` |
+
+Run locally (Windows, elevated console):
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\tests\run-tests.ps1
+powershell.exe -ExecutionPolicy Bypass -File .\tests\smoke.ps1 -OutRoot C:\SOC_Smoke
+```
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) runs on every push and pull request on `windows-latest`:
+encoding check, PSScriptAnalyzer (errors and PowerShell 5.1 syntax compatibility), unit tests in Windows
+PowerShell 5.1 and PowerShell 7, smoke run. The smoke-run report is available as a build artifact.

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Encoding (UTF-8 BOM + CRLF)
+        shell: pwsh
+        run: ./tests/check-encoding.ps1
+
+      - name: PSScriptAnalyzer (errors + PowerShell 5.1 syntax)
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $r = @(Invoke-ScriptAnalyzer -Path ./soc-collect.ps1 -Severity Error)
+          $settings = @{ Rules = @{ PSUseCompatibleSyntax = @{ Enable = $true; TargetVersions = @('5.1', '7.0') } } }
+          $r += @(Invoke-ScriptAnalyzer -Path ./soc-collect.ps1 -IncludeRule PSUseCompatibleSyntax -Settings $settings)
+          $r | Format-Table RuleName, Line, Message -AutoSize -Wrap
+          if ($r.Count) { exit 1 }
+
+      - name: Unit tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\tests\run-tests.ps1
+
+      - name: Unit tests (PowerShell 7)
+        shell: pwsh
+        run: ./tests/run-tests.ps1
+
+      - name: Smoke run (Windows PowerShell 5.1, full collection)
+        shell: powershell
+        run: .\tests\smoke.ps1 -OutRoot "$env:RUNNER_TEMP\soc-smoke"
+
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: ${{ runner.temp }}/soc-smoke
+          if-no-files-found: ignore
