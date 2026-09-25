@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.4.3 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.4.4 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -153,7 +153,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.4.3'
+$ToolVersion = '1.4.4'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -753,6 +753,12 @@ Write-Host "═══ $ToolName v$ToolVersion ═══" -ForegroundColor White
 Write-Host ("Справа: {0} | Хост: {1} | Оператор: {2}" -f $CaseId, $HostName, $Operator)
 Write-Host ("Вікно подій: {0} → {1} (локальний час)" -f $Since.ToString('yyyy-MM-dd HH:mm:ss'), $Until.ToString('yyyy-MM-dd HH:mm:ss'))
 Write-Host ("Результати: {0}" -f $CaseDir)
+# Тестові IOC за замовчуванням (кейс KMSAuto): якщо жоден IOC-параметр не передано, збіги з масками — шум, а не знахідки
+$UsingDefaultIoc = -not (@('NamePatterns', 'IocSha256', 'IocIPs', 'KnownPaths') | Where-Object { $PSBoundParameters.ContainsKey($_) })
+if ($UsingDefaultIoc) {
+    Write-Host "УВАГА: IOC не задано — використано тестові IOC за замовчуванням (KMSAuto). Збіги з масками знижено до «Інфо». Для справи передайте -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths." -ForegroundColor Yellow
+    Add-Note 'Використано тестові IOC за замовчуванням (кейс KMSAuto): жоден з -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths не передано. Прапорці, що спираються лише на збіг з маскою, знижено до «Інфо».'
+}
 if (-not $IsAdmin) { Write-Host "УВАГА: запуск БЕЗ прав адміністратора — Security-журнал, BAM, частина даних будуть недоступні." -ForegroundColor Red; Add-Note "Скрипт запущено без прав адміністратора — частина джерел недоступна." }
 foreach ($w in $EnvWarnings) { Add-Note $w }
 Add-Custody 'START' $HostName 'OK' ("Case={0}; Window={1}..{2}; Admin={3}" -f $CaseId, (U $Since), (U $Until), $IsAdmin)
@@ -1864,7 +1870,7 @@ if ($D.IsDC) {
         $need = @(
             @{ N = 'Kerberos Service Ticket Operations'; G = '{0CCE9240-69AE-11D9-BED3-505054503030}'; R = 3; For = '4769 (Kerberoasting)' },
             @{ N = 'Kerberos Authentication Service'; G = '{0CCE9242-69AE-11D9-BED3-505054503030}'; R = 3; For = '4768 / 4771 (AS-REP, spraying)' },
-            @{ N = 'Directory Service Access'; G = '{0CCE923B-69AE-11D9-BED3-505054503030}'; R = 1; For = '4662 (DCSync) — також потрібен SACL на корені домену' },
+            @{ N = 'Directory Service Access'; G = '{0CCE923B-69AE-11D9-BED3-505054503030}'; R = 1; For = '4662 (DCSync; також потрібен SACL на корені домену)' },
             @{ N = 'Directory Service Changes'; G = '{0CCE923C-69AE-11D9-BED3-505054503030}'; R = 1; For = '5136 (ACL, RBCD, Shadow Credentials, GPO)' },
             @{ N = 'Security Group Management'; G = '{0CCE9237-69AE-11D9-BED3-505054503030}'; R = 1; For = '4728 / 4732 / 4756' },
             @{ N = 'User Account Management'; G = '{0CCE9235-69AE-11D9-BED3-505054503030}'; R = 1; For = '4738 (userAccountControl)' },
@@ -1882,7 +1888,7 @@ if ($D.IsDC) {
                 Fix = $(if ($ok -eq $false) { ('auditpol /set /subcategory:"{0}"{1}{2}' -f $sb.G, $(if ($sb.R -band 1) { ' /success:enable' } else { '' }), $(if ($sb.R -band 2) { ' /failure:enable' } else { '' })) } else { '' }) })
         }
         $D.AdAudit = Arr $aud
-        foreach ($a in @($aud | Where-Object { $_.OK -eq $false })) { Add-Note ("AD: підкатегорія аудиту «{0}» не ввімкнена — {1} не фіксуються, їх відсутність не доводить відсутність атаки." -f $a.Subcategory, $a.Detects) }
+        foreach ($a in @($aud | Where-Object { $_.OK -eq $false })) { Add-Note ("AD: підкатегорія аудиту «{0}» не ввімкнена: події {1} не фіксуються, тож їх відсутність не доводить відсутність атаки." -f $a.Subcategory, $a.Detects) }
 
         # ── Події (XPath-фільтри) ──
         $sU = $Since.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z'); $uU = $Until.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z')
@@ -2415,7 +2421,8 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     }
     foreach ($r in @($D.Services | Where-Object { $_.Flags -match 'Розташування|IOC|Підпис' })) { Add-Flag 'Середньо' 'Служби' ("Підозріла поточна служба: {0}" -f $r.Name) ("{0} — {1}" -f $r.Binary, $r.Flags) 'services' }
     foreach ($t in @($D.Tasks)) {
-        $sev = 'Інфо'; if ($t.Flags -match 'IOC|Дія:|Прихована|Маскування') { $sev = 'Високо' }
+        $tf = [string]$t.Flags; if ($UsingDefaultIoc) { $tf = $tf -replace 'Збіг з маскою IOC', '' }
+        $sev = 'Інфо'; if ($tf -match 'IOC|Дія:|Прихована|Маскування') { $sev = 'Високо' }
         if ($sev -ne 'Інфо' -or $t.Flags -match 'Стороння') { Add-Flag $sev 'Задачі' ("Задача '{0}{1}' (автор: {2})" -f $t.TaskPath, $t.TaskName, $t.Author) ("{0}; дії: {1}; ост. запуск: {2}; {3}" -f $t.State, $t.Actions, $t.LastRunUtc, $t.Flags) 'tasks' }
     }
     foreach ($r in @($D.TaskEvents | Where-Object { $_.EventId -eq 4698 })) { $sev = 'Середньо'; if ($r.Match) { $sev = 'Високо' }; Add-Flag $sev 'Задачі' ("Створено задачу {0}" -f $r.TaskName) ("{0}; {1}; {2}" -f $r.TimeLocal, $r.Actor, $r.Command) 'tasks' }
@@ -2464,6 +2471,16 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     if ($D.LastAccess -like 'УВІМКНЕНО*') { Add-Flag 'Інфо' 'Методологія' 'NTFS last-access увімкнено' 'Accessed може змінитися при читанні — див. розділ цілісності' 'integrity' }
     # Урізана вибірка = частина вікна не проаналізована: початок атаки міг випасти — це не «Інфо»
     foreach ($n in @($Notes | Where-Object { $_ -like 'УВАГА*' })) { Add-Flag 'Середньо' 'Повнота даних' 'Вибірку журналу урізано лімітом -MaxEvents' $n 'integrity' }
+    # Тестові IOC: прапорці, єдина підстава яких — збіг з маскою імені, знижуємо до «Інфо» (IOC-hash / IOC IP не чіпаємо)
+    if ($UsingDefaultIoc) {
+        $maskTitles = '^(LNK на IOC|BAM: запуск|Видалено в кошик|Завантажено з інтернету|Згадки IOC в історії)'
+        foreach ($f in $Flags) {
+            if ($f.Severity -ne 'Середньо') { continue }
+            if ([string]$f.Evidence -match ' — Збіг з маскою IOC$' -or [string]$f.Finding -match $maskTitles) {
+                $f.Severity = 'Інфо'; $f.Finding = "[тестова маска] $($f.Finding)"
+            }
+        }
+    }
 }
 
 # ════════════════════════════════════ 7. TIMELINE (UTC, NIST 5.3) ════════════════════════════════════
@@ -2747,7 +2764,9 @@ r.sort(function(x,y){var a=x.cells[i].innerText,c=y.cells[i].innerText,na=parseF
                   @('rdp', 'RDP'), @('services', 'Служби'), @('tasks', 'Задачі'), @('persist', 'Персистентність'), @('firewall', 'Firewall'), @('defender', 'Defender'),
                   @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
     $nav = (@($navItems | ForEach-Object { "<a href='#$($_[0])'>$(E $_[1])</a>" }) -join '')
-    $banner = "<div class='banner'><b>Live response (NIST SP 800-86).</b> Дані зібрано з працюючої системи без write blocker. Скрипт нічого не змінює й не видаляє; MAC-часи фіксуються до читання, копії доказів верифіковано hash до/після. " +
+    $iocBanner = ''
+    if ($UsingDefaultIoc) { $iocBanner = "<div class='banner'><b>Використано тестові IOC за замовчуванням (кейс KMSAuto).</b> Жоден з -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths не передано — прапорці лише за збігом з маскою знижено до «Інфо» і позначено «[тестова маска]». Для розслідування запустіть з IOC своєї справи.</div>" }
+    $banner = $iocBanner + "<div class='banner'><b>Live response (NIST SP 800-86).</b> Дані зібрано з працюючої системи без write blocker. Скрипт нічого не змінює й не видаляє; MAC-часи фіксуються до читання, копії доказів верифіковано hash до/після. " +
               "NTFS last-access: <b>$(E $D.LastAccess)</b>. Prefetch: <b>$(E $D.PrefetchState)</b>. Для доказів юридичного рівня використовуйте образ/снапшот VM.</div>"
     $html = "<!DOCTYPE html><html lang='uk'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>SOC Live Response — $(E $CaseId) — $(E $HostName)</title><style>$css</style></head><body>" +
             "<header><h1>SOC Live Response — $(E $CaseId)</h1><div class='sub'>$(E $ToolName) v$ToolVersion · збір і первинний аналіз доказів відповідно до NIST SP 800-86</div><div class='meta'>" +

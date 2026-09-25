@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.4.4] — 2026-09-25
+
+### Changed
+- When none of `-NamePatterns` / `-IocSha256` / `-IocIPs` / `-KnownPaths` is passed, the test KMSAuto IOCs are used:
+  a yellow console warning, a collection note and a report banner say so, and flags whose only basis is a file-name
+  mask match are lowered from Medium to Info and marked "[тестова маска]". IOC hash / IOC IP flags are not affected;
+  with case IOCs everything works as before. (On the DC run 29 of 55 Medium flags were such mask noise.)
+- Wording of the note about a disabled AD audit subcategory.
+
 ## [1.4.3] — 2026-09-25
 
 ### Added
