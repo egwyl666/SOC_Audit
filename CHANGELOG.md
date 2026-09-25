@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.8.0] — 2026-09-25
+
+Safe defaults.
+
+### Changed
+- **No built-in IOCs.** `-NamePatterns`, `-KnownPaths`, `-IocSha256`, `-IocIPs` are empty by default. Without any IOC
+  parameter the run is a host audit: configuration, logs and artifacts are collected in full; the disk search by
+  masks (5.2) and the USN extract (5.9) are skipped with a note; the report shows a banner.
+- The KMSAuto test IOCs moved behind a new switch `-TestIoc` (same behaviour as before: mask-only flags lowered to
+  "Інфо" and marked "[тестова маска]").
+
+### Added
+- Warning (console, collection notes, report banner) when `-OutRoot` is on the system drive of the examined host:
+  writing evidence there can overwrite free space that still holds deleted files.
+- `-EncryptZip`: password-protected ZIP (AES-256) via 7-Zip if installed. 7-Zip asks for the password in the console,
+  so it never appears on the command line, in 4688 or in PowerShell history. Without 7-Zip a plain ZIP is created and
+  a warning is shown.
+
 ## [1.7.2] — 2026-09-25
 
 ### Fixed

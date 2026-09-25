@@ -55,22 +55,14 @@ param(
     # ─── Куди складати докази ───────────────────────────────────────────────
     [string]$OutRoot = "C:\SOC_Evidence",
 
-    # ─── IOC та критерії пошуку (редагуйте під нову справу) ─────────────────
-    [string[]]$NamePatterns = @("*KMS*", "*activ*", "*SECOPatcher*"),
-    [string[]]$KnownPaths = @(
-        "C:\Windows\KMSAutoS",
-        "C:\Windows\KMSAutoS\KMSAuto++ x64.exe",
-        "C:\Windows\KMSAutoS\KMSAuto_Files\bin\KMSSS.exe",
-        "C:\Windows\KMSAutoS\KMSAuto_Files\bin\driver\x64WDV\SECOPatcher.dll",
-        "C:\kmsauto_windows_11.rar",
-        "C:\kmsauto_windows_11"
-    ),
-    [string[]]$IocSha256 = @(
-        "ABAA1B89DCA9655410F61D64DE25990972DB95D28738FC93BB7A8A69B347A6A6",
-        "397E90D1E6E5CA717186A12011220AD18092F10DB85101CB994DC0567D9F568E"
-    ),
-    [string[]]$IocIPs = @("192.168.77.51", "fe80::1a2b:3c4d:5e6f:7a8b", "10.9.0.20"),
+    # ─── IOC та критерії пошуку (передавайте під кожну справу) ──────────────
+    # Без жодного IOC-параметра скрипт працює як аудит хоста: усе збирається, пошук за масками пропускається.
+    [string[]]$NamePatterns = @(),
+    [string[]]$KnownPaths = @(),
+    [string[]]$IocSha256 = @(),
+    [string[]]$IocIPs = @(),
     [string[]]$IocSha1 = @(),      # SHA1 (Amcache зберігає SHA1, а не SHA256)
+    [switch]$TestIoc,              # тестові IOC кейсу KMSAuto (для перевірки інструмента)
 
     # ─── Де шукати файли (порожньо = всі локальні диски) ────────────────────
     [string[]]$SearchRoots = @(),
@@ -88,7 +80,8 @@ param(
     [switch]$CollectHives,         # reg save SYSTEM/SOFTWARE + Amcache через esentutl /vss (створює тимчасову тіньову копію!)
     [switch]$UsnJournal,           # вибірка з USN-журналу за масками (довго)
     [switch]$NoEvtx,               # не експортувати оригінальні .evtx (лише CSV-вибірки)
-    [switch]$NoZip
+    [switch]$NoZip,
+    [switch]$EncryptZip            # архів із паролем AES-256 через 7-Zip (пароль вводиться в консолі 7-Zip, не в командному рядку)
 )
 
 # ════════════════════════════════════ ІНІЦІАЛІЗАЦІЯ ════════════════════════════════════
@@ -154,7 +147,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.7.2'
+$ToolVersion = '1.8.0'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -186,6 +179,17 @@ $CustodyLive = Join-Path $CaseDir 'chain_of_custody.log'
 function Split-ListParam { param([string[]]$v) if ($v -and $v.Count -eq 1 -and $v[0] -match ',') { return @($v[0] -split '\s*,\s*' | Where-Object { $_ }) }; return @($v) }
 $NamePatterns = Split-ListParam $NamePatterns; $KnownPaths = Split-ListParam $KnownPaths; $IocSha256 = Split-ListParam $IocSha256
 $IocIPs = Split-ListParam $IocIPs; $IocSha1 = @(Split-ListParam $IocSha1 | ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { $_ }); $SearchRoots = Split-ListParam $SearchRoots; $ExcludeDirs = Split-ListParam $ExcludeDirs
+# Режим IOC: свої (передано хоча б один IOC-параметр) / тестові KMSAuto (-TestIoc) / без IOC (аудит хоста)
+$ScriptBound = $PSBoundParameters   # копія посилання: усередині Where-Object {} $PSBoundParameters може належати іншій області
+$IocBound = [bool](@('NamePatterns', 'IocSha256', 'IocSha1', 'IocIPs', 'KnownPaths') | Where-Object { $ScriptBound.ContainsKey($_) })
+if ($TestIoc -and -not $IocBound) {
+    $NamePatterns = @('*KMS*', '*activ*', '*SECOPatcher*')
+    $KnownPaths = @('C:\Windows\KMSAutoS', 'C:\Windows\KMSAutoS\KMSAuto++ x64.exe', 'C:\Windows\KMSAutoS\KMSAuto_Files\bin\KMSSS.exe',
+                    'C:\Windows\KMSAutoS\KMSAuto_Files\bin\driver\x64WDV\SECOPatcher.dll', 'C:\kmsauto_windows_11.rar', 'C:\kmsauto_windows_11')
+    $IocSha256 = @('ABAA1B89DCA9655410F61D64DE25990972DB95D28738FC93BB7A8A69B347A6A6', '397E90D1E6E5CA717186A12011220AD18092F10DB85101CB994DC0567D9F568E')
+    $IocIPs = @('192.168.77.51', 'fe80::1a2b:3c4d:5e6f:7a8b', '10.9.0.20')
+}
+$NoIoc = (-not $IocBound -and -not $TestIoc)
 # Папку з доказами виключаємо з пошуку ПІСЛЯ розбиття списку. Якщо OutRoot — корінь диска (E:\),
 # виключаємо лише папку поточної справи, інакше '\' виключив би взагалі все.
 $OutRel = ($OutRoot -replace '^[A-Za-z]:', '').TrimEnd('\')
@@ -872,12 +876,22 @@ Write-Host "═══ $ToolName v$ToolVersion ═══" -ForegroundColor White
 Write-Host ("Справа: {0} | Хост: {1} | Оператор: {2}" -f $CaseId, $HostName, $Operator)
 Write-Host ("Вікно подій: {0} → {1} (локальний час)" -f $Since.ToString('yyyy-MM-dd HH:mm:ss'), $Until.ToString('yyyy-MM-dd HH:mm:ss'))
 Write-Host ("Результати: {0}" -f $CaseDir)
-# Тестові IOC за замовчуванням (кейс KMSAuto): якщо жоден IOC-параметр не передано, збіги з масками — шум, а не знахідки
-$ScriptBound = $PSBoundParameters   # копія посилання: усередині Where-Object {} $PSBoundParameters може належати іншій області
-$UsingDefaultIoc = -not (@('NamePatterns', 'IocSha256', 'IocSha1', 'IocIPs', 'KnownPaths') | Where-Object { $ScriptBound.ContainsKey($_) })
+# Тестові IOC (кейс KMSAuto, -TestIoc): збіги з масками — шум, а не знахідки
+$UsingDefaultIoc = [bool]$TestIoc -and -not (@('NamePatterns', 'IocSha256', 'IocSha1', 'IocIPs', 'KnownPaths') | Where-Object { $ScriptBound.ContainsKey($_) })
 if ($UsingDefaultIoc) {
-    Write-Host "УВАГА: IOC не задано — використано тестові IOC за замовчуванням (KMSAuto). Збіги з масками знижено до «Інфо». Для справи передайте -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths." -ForegroundColor Yellow
-    Add-Note 'Використано тестові IOC за замовчуванням (кейс KMSAuto): жоден з -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths не передано. Прапорці, що спираються лише на збіг з маскою, знижено до «Інфо».'
+    Write-Host "УВАГА: -TestIoc — використано тестові IOC (KMSAuto). Збіги з масками знижено до «Інфо»." -ForegroundColor Yellow
+    Add-Note 'Використано тестові IOC (кейс KMSAuto, -TestIoc). Прапорці, що спираються лише на збіг з маскою, знижено до «Інфо».'
+}
+if ($NoIoc) {
+    Write-Host "IOC не задано — режим аудиту хоста: усе збирається, пошук за масками/hash/IP пропущено. Для справи передайте -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths." -ForegroundColor Yellow
+    Add-Note 'IOC не задано (режим аудиту хоста): збір і аналіз конфігурації, журналів і артефактів виконано повністю; пошук за масками імен, hash та IP не виконувався.'
+}
+# Докази на системному диску досліджуваного хоста затирають вільне місце (там можуть лишатися видалені файли)
+$OutDrive = ''; try { $OutDrive = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($OutRoot)).TrimEnd('\') } catch {}
+$OnSystemDrive = ($OutDrive -and $env:SystemDrive -and $OutDrive -eq $env:SystemDrive)
+if ($OnSystemDrive) {
+    Write-Host ("УВАГА: результати пишуться на системний диск {0} досліджуваного хоста. Для реального інциденту вкажіть -OutRoot на зовнішньому диску або мережевій папці." -f $OutDrive) -ForegroundColor Yellow
+    Add-Note ("Результати записано на системний диск {0} досліджуваного хоста (-OutRoot {1}): запис міг затерти вільне місце, де лишалися видалені файли. NIST SP 800-86 рекомендує зовнішній носій." -f $OutDrive, $OutRoot)
 }
 if (-not $IsAdmin) { Write-Host "УВАГА: запуск БЕЗ прав адміністратора — Security-журнал, BAM, частина даних будуть недоступні." -ForegroundColor Red; Add-Note "Скрипт запущено без прав адміністратора — частина джерел недоступна." }
 foreach ($w in $EnvWarnings) { Add-Note $w }
@@ -2434,6 +2448,8 @@ Invoke-Step "5.1 Відомі шляхи IOC: MAC до/після, hash, під�
     Save-Csv $D.KnownFiles '05_artifacts\known_paths.csv'
 }
 
+if (-not @($NamePatterns).Count -and -not $SkipWideSearch) { $SkipWideSearch = $true; Add-Note 'Широкий пошук по дисках не виконувався: маски імен (-NamePatterns) не задано.' }
+elseif ($SkipWideSearch) { Add-Note 'Широкий пошук по дисках пропущено (-SkipWideSearch).' }
 if (-not $SkipWideSearch) {
     Invoke-Step "5.2 Широкий пошук за масками по всіх дисках (класифікація: цікаві / ймовірний шум)" {
         $hiExt = '^(?i)\.(exe|dll|sys|scr|com|msi|ps1|psm1|bat|cmd|vbs|vbe|js|jse|wsf|hta|lnk|rar|zip|7z|cab|iso|img|ini|cfg|txt|reg|xml|json|log)$'
@@ -2457,7 +2473,7 @@ if (-not $SkipWideSearch) {
         Save-Csv $D.WideLow '05_artifacts\pattern_hits_low_interest.csv'
         Save-Csv $D.WideDirs '05_artifacts\pattern_dirs.csv'
     }
-} else { Add-Note 'Широкий пошук по дисках пропущено (-SkipWideSearch).' }
+}
 
 Invoke-Step "5.3 LNK-ярлики (Recent, Desktop) з розбором цілі" {
     $wsh = $null; try { $wsh = New-Object -ComObject WScript.Shell } catch { Add-Note 'WScript.Shell недоступний — ціль LNK не розбирається.' }
@@ -2645,7 +2661,8 @@ if ($CollectHives) {
     }
 }
 
-if ($UsnJournal) {
+if ($UsnJournal -and -not @($NamePatterns).Count) { Add-Note 'USN-журнал не розбирався: маски імен (-NamePatterns) не задано.' }
+if ($UsnJournal -and @($NamePatterns).Count) {
     Invoke-Step "5.9 USN-журнал: записи за масками (створення/видалення/перейменування)" {
         $sb = New-Object System.Text.StringBuilder
         foreach ($r in $SearchRootsFinal) {
@@ -3264,7 +3281,9 @@ r.sort(function(x,y){var a=x.cells[i].innerText,c=y.cells[i].innerText,sa=a.repl
                   @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('traces', 'Сліди запуску'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
     $nav = (@($navItems | ForEach-Object { "<a href='#$($_[0])'>$(E $_[1])</a>" }) -join '')
     $iocBanner = ''
-    if ($UsingDefaultIoc) { $iocBanner = "<div class='banner'><b>Використано тестові IOC за замовчуванням (кейс KMSAuto).</b> Жоден з -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths не передано — прапорці лише за збігом з маскою знижено до «Інфо» і позначено «[тестова маска]». Для розслідування запустіть з IOC своєї справи.</div>" }
+    if ($UsingDefaultIoc) { $iocBanner = "<div class='banner'><b>Використано тестові IOC (кейс KMSAuto, -TestIoc).</b> Прапорці лише за збігом з маскою знижено до «Інфо» і позначено «[тестова маска]». Для розслідування запустіть з IOC своєї справи.</div>" }
+    if ($NoIoc) { $iocBanner = "<div class='banner'><b>Режим аудиту хоста: IOC не задано.</b> Конфігурацію, журнали й артефакти зібрано повністю; пошук за масками імен, hash і IP не виконувався. Для розслідування передайте -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths.</div>" }
+    if ($OnSystemDrive) { $iocBanner += "<div class='banner'><b>Докази записано на системний диск $(E $OutDrive) досліджуваного хоста.</b> Для реального інциденту використовуйте -OutRoot на зовнішньому носії.</div>" }
     $banner = $iocBanner + "<div class='banner'><b>Live response (NIST SP 800-86).</b> Дані зібрано з працюючої системи без write blocker. Скрипт нічого не змінює й не видаляє; MAC-часи фіксуються до читання, копії доказів верифіковано hash до/після. " +
               "NTFS last-access: <b>$(E $D.LastAccess)</b>. Prefetch: <b>$(E $D.PrefetchState)</b>. Для доказів юридичного рівня використовуйте образ/снапшот VM.</div>"
     $html = "<!DOCTYPE html><html lang='uk'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>SOC Live Response — $(E $CaseId) — $(E $HostName)</title><style>$css</style></head><body>" +
@@ -3294,7 +3313,16 @@ if (-not $NoZip) {
     Write-Host ("[{0}] 10. Архів справи" -f (Get-Date -Format 'HH:mm:ss')) -ForegroundColor Cyan
     try {
         $zipPath = "$CaseDir.zip"
-        Compress-Archive -LiteralPath $CaseDir -DestinationPath $zipPath -CompressionLevel Optimal -Force -ErrorAction Stop
+        $sevenZip = @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+        if ($EncryptZip -and $sevenZip) {
+            # -p без значення: 7-Zip сам запитує пароль у консолі — пароль не потрапляє в командний рядок, 4688 і історію
+            Write-Host '    Архів із паролем (AES-256, 7-Zip). Введіть пароль двічі:' -ForegroundColor Cyan
+            & $sevenZip a -tzip -mem=AES256 -p $zipPath $CaseDir | Out-Host
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zipPath)) { throw "7-Zip завершився з кодом $LASTEXITCODE" }
+        } else {
+            if ($EncryptZip) { Write-Host '    ! -EncryptZip: 7-Zip не знайдено — створено звичайний ZIP без пароля. Зашифруйте архів перед передачею.' -ForegroundColor Yellow }
+            Compress-Archive -LiteralPath $CaseDir -DestinationPath $zipPath -CompressionLevel Optimal -Force -ErrorAction Stop
+        }
         $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
         [IO.File]::WriteAllText("$zipPath.sha256", "$zipHash  $(Split-Path $zipPath -Leaf)`r`n", (New-Object Text.UTF8Encoding($false)))
     } catch { Write-Host "    ! ZIP не створено: $($_.Exception.Message)" -ForegroundColor Yellow; $zipPath = '' }

@@ -2,7 +2,7 @@
 
 [English](README.md) | Українська
 
-**SOC Live Response Collector v1.7.2** — один скрипт збору доказів і первинного аналізу Windows-хоста
+**SOC Live Response Collector v1.8.0** — один скрипт збору доказів і первинного аналізу Windows-хоста
 (замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`). Узгоджено з **NIST SP 800-86**.
 
 Скрипт збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти, перевіряє
@@ -50,8 +50,9 @@ Windows, режим `FullLanguage`. Якщо щось не так — зрозу
 [Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24 -NamePatterns '*evil*' -IocIPs '203.0.113.5' -OutRoot 'E:\SOC_Evidence'
 ```
 
-> Увага: без власних IOC скрипт використовує тестові маски KMSAuto (про це є банер у звіті). Зафіксуйте виведений
-> SHA256 у тікеті — він визначає точну версію, яку було запущено.
+> Увага: без IOC скрипт працює як аудит хоста: усе збирається, пропускається лише пошук за масками імен, hash і IP
+> (про це є банер у звіті). Якщо `-OutRoot` на системному диску — консоль і звіт про це попереджають. Зафіксуйте
+> виведений SHA256 у тікеті — він визначає точну версію, яку було запущено.
 
 ### 2.1 Через `-File` — основний
 
@@ -112,16 +113,19 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 
 | Параметр | За замовчуванням | Опис |
 |---|---|---|
-| `-NamePatterns` | `*KMS*`, `*activ*`, `*SECOPatcher*` | Маски імен файлів (пошук по дисках, LNK, BAM, Prefetch, кошик, історія браузерів) |
-| `-KnownPaths` | шляхи KMSAuto | Конкретні файли/папки: hash, підпис, MAC до/після, Zone.Identifier |
-| `-IocSha256` | hash KMSAuto++ і архіву | Шукаються у файлах, процесах, службах, Sysmon |
+| `-NamePatterns` | — | Маски імен файлів (пошук по дисках, LNK, BAM, Prefetch, кошик, історія браузерів) |
+| `-KnownPaths` | — | Конкретні файли/папки: hash, підпис, MAC до/після, Zone.Identifier |
+| `-IocSha256` | — | Шукаються у файлах, процесах, службах, Sysmon |
 | `-IocSha1` | — | SHA1 файлів; шукаються в Amcache (він зберігає SHA1, а не SHA256). Потрібен `-CollectHives` |
-| `-IocIPs` | `192.168.77.51`, `fe80::1a2b:…`, `10.9.0.20` | Шукаються в з'єднаннях, ARP/NDP, pfirewall.log, RDP, 4625, реєстрі KMS. Збіг — лише за межами адреси (`10.9.0.20` не збігається з `110.9.0.201`) |
+| `-IocIPs` | — | Шукаються в з'єднаннях, ARP/NDP, pfirewall.log, RDP, 4625, реєстрі KMS. Збіг — лише за межами адреси (`10.9.0.20` не збігається з `110.9.0.201`) |
 | `-SearchRoots` | усі локальні та знімні диски | Де шукати файли |
 | `-ExcludeDirs` | WinSxS, DriverStore, servicing… | Фрагменти шляхів, які пропускаються |
 
-> Увага: **для нової справи обов'язково змініть маски та IOC.** Дефолтні налаштовані під тестовий кейс KMSAuto —
-> на іншій системі `*activ*` дасть багато хибних спрацювань (Active Directory, ActiveX, `active-response` у Wazuh).
+| `-TestIoc` | вимкнено | Вбудовані IOC тестового кейсу KMSAuto (для перевірки інструмента); прапорці лише за збігом з маскою знижуються до «Інфо» |
+
+> Увага: **вбудованих IOC немає.** Без жодного IOC-параметра запуск — це аудит хоста (конфігурація, журнали,
+> артефакти); пошук по дисках за масками і вибірка з USN пропускаються. Маски — це підрядки: `*activ*` дає багато
+> хибних збігів (Active Directory, ActiveX, Wazuh `active-response`).
 
 ### Куди зберігати
 
@@ -150,6 +154,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache через `esentutl /vss`, розбір Amcache (крок 5.10) | Глибока форензика, пошук видалених файлів за SHA1. Увага: створює тіньову копію — змінює систему (фіксується в custody) |
 | `-UsnJournal` | Вибірка з USN-журналу за масками | Потрібно знати, коли файли створювалися/видалялися. Довго |
 | `-NoZip` | Без ZIP-архіву | Коли архів не потрібен |
+| `-EncryptZip` | ZIP з паролем (AES-256) через 7-Zip; пароль 7-Zip запитує в консолі, тож він не потрапляє в командний рядок | У доказах — історія браузерів і PowerShell. Без 7-Zip створюється звичайний ZIP і виводиться попередження |
 
 ---
 

@@ -2,7 +2,7 @@
 
 English | [Українська](README.uk.md)
 
-**SOC Live Response Collector v1.7.2** — a single script for evidence collection and first-pass analysis of a Windows host
+**SOC Live Response Collector v1.8.0** — a single script for evidence collection and first-pass analysis of a Windows host
 (replaces the old main audit + `fwlog.ps1` + `filesinter.ps1`). Aligned with **NIST SP 800-86**.
 
 The script collects volatile data, persistence, event logs, `pfirewall.log` and file artifacts, checks security
@@ -52,8 +52,9 @@ For a real incident, add your IOCs and write the results to an external drive:
 [Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24 -NamePatterns '*evil*' -IocIPs '203.0.113.5' -OutRoot 'E:\SOC_Evidence'
 ```
 
-> Note: without your own IOCs the script uses the test KMSAuto masks (a banner in the report says so). Record the
-> printed SHA256 in the ticket — it identifies the exact version that was run.
+> Note: without IOCs the script runs as a host audit: everything is collected, only the search by name masks,
+> hashes and IPs is skipped (a banner in the report says so). If `-OutRoot` is on the system drive, the console and
+> the report warn about it. Record the printed SHA256 in the ticket — it identifies the exact version that was run.
 
 ### 2.1 Via `-File` — recommended
 
@@ -114,16 +115,19 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 
 | Parameter | Default | Description |
 |---|---|---|
-| `-NamePatterns` | `*KMS*`, `*activ*`, `*SECOPatcher*` | File name masks (disk search, LNK, BAM, Prefetch, Recycle Bin, browser history) |
-| `-KnownPaths` | KMSAuto paths | Specific files/folders: hash, signature, MAC before/after, Zone.Identifier |
-| `-IocSha256` | KMSAuto++ and archive hashes | Matched against files, processes, services, Sysmon |
+| `-NamePatterns` | — | File name masks (disk search, LNK, BAM, Prefetch, Recycle Bin, browser history) |
+| `-KnownPaths` | — | Specific files/folders: hash, signature, MAC before/after, Zone.Identifier |
+| `-IocSha256` | — | Matched against files, processes, services, Sysmon |
 | `-IocSha1` | — | File SHA1s; matched against Amcache (it stores SHA1, not SHA256). Requires `-CollectHives` |
-| `-IocIPs` | `192.168.77.51`, `fe80::1a2b:…`, `10.9.0.20` | Matched against connections, ARP/NDP, pfirewall.log, RDP, 4625, KMS registry. Whole-address match only (`10.9.0.20` does not match `110.9.0.201`) |
+| `-IocIPs` | — | Matched against connections, ARP/NDP, pfirewall.log, RDP, 4625, KMS registry. Whole-address match only (`10.9.0.20` does not match `110.9.0.201`) |
 | `-SearchRoots` | all local and removable drives | Where to search for files |
 | `-ExcludeDirs` | WinSxS, DriverStore, servicing… | Path fragments to skip |
 
-> Note: **for a new case you must change the masks and IOCs.** The defaults belong to the KMSAuto test case —
-> elsewhere `*activ*` gives many false positives (Active Directory, ActiveX, Wazuh `active-response`).
+| `-TestIoc` | off | Built-in IOCs of the KMSAuto test case (for checking the tool); flags based only on mask matches are lowered to "Інфо" |
+
+> Note: **no IOCs are built in.** Without any IOC parameter the run is a host audit (configuration, logs,
+> artifacts); the disk search by masks and the USN extract are skipped. Masks are substrings: `*activ*` gives many
+> false positives (Active Directory, ActiveX, Wazuh `active-response`).
 
 ### Output location
 
@@ -152,6 +156,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache via `esentutl /vss`, Amcache parsing (step 5.10) | Deep forensics, finding deleted files by SHA1. Note: creates a shadow copy — modifies the system (recorded in custody) |
 | `-UsnJournal` | USN journal extract by masks | When you need to know when files were created/deleted. Slow |
 | `-NoZip` | No ZIP archive | When you don't need the archive |
+| `-EncryptZip` | Password-protected ZIP (AES-256) via 7-Zip; 7-Zip asks for the password in the console, so it never appears on the command line | Evidence contains browser and PowerShell history. Without 7-Zip a plain ZIP is made and a warning is shown |
 
 ---
 

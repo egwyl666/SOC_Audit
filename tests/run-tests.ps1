@@ -241,10 +241,13 @@ try {
 
     Test-Group 'Тестові IOC за замовчуванням'
     $defExpr = [scriptblock]::Create(($srcText -split "`n" | Where-Object { $_ -match '^\$UsingDefaultIoc = ' } | Select-Object -First 1))
-    $ScriptBound = @{ CaseId = 'x'; Hours = 24 }
-    . $defExpr; Assert-True 'без IOC-параметрів -> тестові' ($UsingDefaultIoc -eq $true)
-    $ScriptBound = @{ CaseId = 'x'; IocIPs = @('1.2.3.4') }
-    . $defExpr; Assert-True 'з -IocIPs -> свої' ($UsingDefaultIoc -eq $false)
+    $ScriptBound = @{ CaseId = 'x'; Hours = 24 }; $TestIoc = $false
+    . $defExpr; Assert-True 'без IOC і без -TestIoc -> не тестові' ($UsingDefaultIoc -eq $false)
+    $ScriptBound = @{ CaseId = 'x'; Hours = 24; TestIoc = $true }; $TestIoc = $true
+    . $defExpr; Assert-True '-TestIoc -> тестові' ($UsingDefaultIoc -eq $true)
+    $ScriptBound = @{ CaseId = 'x'; IocIPs = @('1.2.3.4'); TestIoc = $true }
+    . $defExpr; Assert-True '-TestIoc + -IocIPs -> свої' ($UsingDefaultIoc -eq $false)
+    $TestIoc = $false
     $downgrade = [scriptblock]::Create((Get-SourceText ('    if ($UsingDefaultIoc) {' + "`n" + '        $maskTitles') "`n    }`n") + "`n    }")
     $Flags = New-Object System.Collections.Generic.List[object]
     $Flags.Add([pscustomobject]@{ Severity = 'Середньо'; Finding = 'Активне правило: mDNS'; Evidence = 'Inbound Allow UDP/5353 svchost — Збіг з маскою IOC' })
