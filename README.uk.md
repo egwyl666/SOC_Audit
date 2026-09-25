@@ -2,7 +2,7 @@
 
 [English](README.md) | Українська
 
-**SOC Live Response Collector v1.6.0** — один скрипт збору доказів і первинного аналізу Windows-хоста
+**SOC Live Response Collector v1.7.0** — один скрипт збору доказів і первинного аналізу Windows-хоста
 (замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`). Узгоджено з **NIST SP 800-86**.
 
 Скрипт збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти, перевіряє
@@ -218,10 +218,10 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── manifest.csv.sha256          ← hash маніфесту
 ├── 00_tool\                     ← копія скрипта, яким збирали
 ├── 01_volatile\                 ← процеси, мережа, netstat_ano.txt, сесії
-├── 02_system\                   ← система; security_config_audit.csv; на DC — ad_config.csv, ad_risky_accounts.csv
+├── 02_system\                   ← система (повні переліки: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; на DC — ad_config.csv, ad_risky_accounts.csv
 ├── 03_eventlogs\                ← вибірки журналів; на DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← оригінальні журнали .evtx + evtx_export.csv
-├── 04_firewall\
+├── 04_firewall\                 ← fw_rules_all.csv (усі правила, включно з вимкненими), журнал firewall
 ├── 05_artifacts\                ← файлові артефакти; сліди запуску: userassist.csv, runmru.csv, shimcache.csv, amcache_files.csv
 └── 06_evidence_copies\          ← верифіковані копії (браузери, pfirewall.log, кущі)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
@@ -231,7 +231,8 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 ### HTML-звіт
 
-- Бокове меню — 20 розділів (зокрема «13.1 Сліди запуску»), зокрема «4.1 Налаштування безпеки» і «5.1 Active Directory» (на DC)
+- Перший розділ — «1.1 Стабільність надходження логів»: канал, подій за 24 год, усього записів, розмір, заповненість, глибина історії, режим; вимкнені канали підсвічено; під таблицею — ключові показники (покриття вікна, Sysmon, 4104, командний рядок у 4688)
+- Бокове меню — 21 розділ (зокрема «13.1 Сліди запуску»), зокрема «4.1 Налаштування безпеки» і «5.1 Active Directory» (на DC)
 - Картки-лічильники та таблиця прапорців з рівнем (Критично / Високо / Середньо / Інфо)
 - У кожній таблиці: **фільтр** (поле пошуку) і **сортування** (клік по заголовку)
 - Підсвітка рядків: червоний — IOC / критично, помаранчевий — підозріло, зелений — VERIFIED / OK

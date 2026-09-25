@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.7.0] — 2026-09-25
+
+Complete source data and a clearer report. Flags and highlighting still work on the same subsets, so there is no extra noise.
+Status: parser check and unit tests pass; Windows validation in CI; runs on DC01 / Pro to follow.
+
+### Changed — source CSVs are no longer pre-filtered
+- **Firewall rules:** all rules, including disabled ones (`04_firewall\fw_rules_all.csv`, column `Enabled`);
+  `fw_rules_enabled.csv` is kept.
+- **Scheduled tasks:** every task, including the built-in `\Microsoft\` ones (`02_system\scheduled_tasks_all.csv`,
+  column `Suspicious`); `scheduled_tasks_nonms_or_suspicious.csv` is kept.
+- **Prefetch:** every `.pf` file (`05_artifacts\prefetch_all.csv`, column `Match`), not only mask matches.
+- **ARP/NDP:** all neighbour states (Unreachable / Permanent were dropped before).
+- **Defender:** all properties of `Get-MpComputerStatus` and `Get-MpPreference` (`02_system\defender_full.csv`).
+- **Event logs:** inventory of every channel on the host (`02_system\eventlog_inventory.csv`); the health check also
+  covers WMI-Activity, WinRM, BITS, SMBServer/Security, NTLM/Operational, RDPClient, Directory Service and DNS Server
+  (for reference only, no flags); new column `Events24h`.
+
+### Added
+- Report section **1.1 "Стабільність надходження логів"**, opened by default:
+  - table: channel, events in the last 24 h (from the RecordId difference, without reading every event), total records,
+    max size, fill %, history days, mode, state;
+  - disabled channels and channels that do not cover the window are highlighted;
+  - numbers use thousands separators;
+  - below it a "Показник / Значення" table: snapshot time, Security history depth and window coverage, Sysmon, 4104,
+    command line in 4688, disabled / absent channels, channel totals.
+- Full tables in the report: all firewall rules (disabled ones greyed), all scheduled tasks, all log channels, all
+  Prefetch files, full Defender state.
+- Table sorting treats "33 744" and "15,1" as numbers.
+
 ## [1.6.0] — 2026-09-25
 
 Execution traces — "was the file run, by whom and when" where Prefetch is off (servers) and 4688/Sysmon are not set up.

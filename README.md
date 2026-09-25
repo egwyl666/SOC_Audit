@@ -2,7 +2,7 @@
 
 English | [Українська](README.uk.md)
 
-**SOC Live Response Collector v1.6.0** — a single script for evidence collection and first-pass analysis of a Windows host
+**SOC Live Response Collector v1.7.0** — a single script for evidence collection and first-pass analysis of a Windows host
 (replaces the old main audit + `fwlog.ps1` + `filesinter.ps1`). Aligned with **NIST SP 800-86**.
 
 The script collects volatile data, persistence, event logs, `pfirewall.log` and file artifacts, checks security
@@ -220,10 +220,10 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── manifest.csv.sha256          ← manifest hash
 ├── 00_tool\                     ← copy of the script used for collection
 ├── 01_volatile\                 ← processes, network, netstat_ano.txt, sessions
-├── 02_system\                   ← system; security_config_audit.csv; on a DC — ad_config.csv, ad_risky_accounts.csv
+├── 02_system\                   ← system (full lists: scheduled_tasks_all.csv, eventlog_inventory.csv, defender_full.csv); security_config_audit.csv; on a DC — ad_config.csv, ad_risky_accounts.csv
 ├── 03_eventlogs\                ← log extracts; on a DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← original .evtx logs + evtx_export.csv
-├── 04_firewall\
+├── 04_firewall\                 ← fw_rules_all.csv (all rules, including disabled), firewall log
 ├── 05_artifacts\                ← file artifacts; execution traces: userassist.csv, runmru.csv, shimcache.csv, amcache_files.csv
 └── 06_evidence_copies\          ← verified copies (browsers, pfirewall.log, hives)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
@@ -233,7 +233,8 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 ### HTML report
 
-- Sidebar navigation — 20 sections (incl. "13.1 Execution traces"), incl. "4.1 Security settings" and "5.1 Active Directory" (on a DC)
+- First section — "1.1 Log ingestion stability": channel, events in the last 24 h, total records, size, fill, history depth, mode; disabled channels highlighted; below it the key indicators (window coverage, Sysmon, 4104, command line in 4688)
+- Sidebar navigation — 21 sections (incl. "13.1 Execution traces"), incl. "4.1 Security settings" and "5.1 Active Directory" (on a DC)
 - Counter cards and a flag table with severity (Critical / High / Medium / Info)
 - Every table has a **filter** (search box) and **sorting** (click a header)
 - Row highlighting: red — IOC / critical, orange — suspicious, green — VERIFIED / OK
