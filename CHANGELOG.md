@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.4.1] — 2026-09-25
+
+Fixes from the v1.4 run on a domain controller. Status: parser check and unit tests passed; **Windows run pending**.
+
+### Fixed
+- Step 2.10 failed with "Specified method is not supported": a helper function was named `FT`, which is the built-in
+  alias of `Format-Table` (aliases take precedence over functions). Renamed to `ConvertFrom-AdFileTime` / `Get-AdProp`;
+  all function names are now checked against built-in aliases.
+- `auditpol /r` was parsed by English column headers. On a localized OS (RU/UA) the headers are translated, so every
+  subcategory was read as "no auditing" — in step 3.10 and in the existing step 2.8. Columns are now read by position;
+  anything unrecognised is reported as "unknown", not as "no auditing". Shared helper `Get-AuditSubcategory`.
+
+### Changed
+- README (EN/UK) rewritten in a plain style: no emoji, badges, HTML blocks or diagrams; content updated to v1.4.
+
 ## [1.4] — 2026-09-25
 
 Active Directory — two new, independent steps that run **only on a domain controller** (elsewhere: one line in notes).

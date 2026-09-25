@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.4 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.4.1 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -153,7 +153,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.4'
+$ToolVersion = '1.4.1'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -705,6 +705,28 @@ function Get-ExecReason {
     if ($Cmd -match '(?i)(-enc(odedcommand)?\s|frombase64string|downloadstring|downloadfile|invoke-webrequest|add-mppreference|set-mppreference|msft_mppreference|advfirewall|/skms|/ato|/ipk|delete\s+shadows|clear-eventlog|wevtutil(\.exe)?\s+cl)') { $r += 'Підозрілі аргументи' }
     return ($r -join '; ')
 }
+function ConvertFrom-AuditpolCsv {   # рядки 'auditpol /get /subcategory:{GUID} /r' -> @{ Value = 0..3 або $null; Text }
+    # Заголовки CSV у локалізованій ОС перекладені (RU/UA), тому колонки беремо за ПОЗИЦІЄЮ:
+    # 0 Machine Name, 1 Policy Target, 2 Subcategory, 3 Subcategory GUID, 4 Inclusion Setting, 5 Exclusion Setting, 6 Setting Value
+    param([string[]]$Lines)
+    $res = [pscustomobject]@{ Value = $null; Text = '' }
+    $rows = @(@($Lines | Where-Object { $_ -and $_.Trim() }) | ConvertFrom-Csv)
+    if (-not $rows.Count) { return $res }
+    $props = @($rows[0].PSObject.Properties)
+    if ($props.Count -ge 5) { $res.Text = [string]$props[4].Value }
+    $last = ([string]$props[$props.Count - 1].Value).Trim()
+    if ($props.Count -ge 7 -and $last -match '^[0-3]$') { $res.Value = [int]$last; return $res }
+    # запасний шлях — текст Inclusion Setting (EN/RU/UA)
+    $t = $res.Text
+    if ($t -match '(?i)no auditing|нет аудита|немає аудиту|без аудиту') { $res.Value = 0; return $res }
+    $v = 0
+    if ($t -match '(?i)success|успех|успіх') { $v = $v -bor 1 }
+    if ($t -match '(?i)failure|сбой|збій|отказ|відмов|невдач') { $v = $v -bor 2 }
+    if ($v) { $res.Value = $v }   # нічого не розпізнали -> $null («невідомо»), а не 0 («немає аудиту»)
+    return $res
+}
+function Get-AuditSubcategory { param([string]$Guid) try { return (ConvertFrom-AuditpolCsv @(& auditpol /get /subcategory:"$Guid" /r 2>$null)) } catch { return [pscustomobject]@{ Value = $null; Text = '' } } }
+
 function Get-Sha256FromHashes { param([string]$h) if ($h -match '(?i)SHA256=([0-9a-f]{64})') { return $Matches[1].ToUpper() }; return '' }
 
 # Інтерпретатори/проксі-запуску, якими маскують задачі під \Microsoft\ (бінарник системний, шкідливе — в аргументах)
@@ -1210,18 +1232,9 @@ Invoke-Step "2.8 Журнали подій: розмір, заповненіст
     $bits = @{ 0 = 'Немає аудиту'; 1 = 'Успіх'; 2 = 'Відмова'; 3 = 'Успіх і відмова' }
     foreach ($sb in $subs) {
         $cur = ''; $ok = $null
-        try {
-            $csv = @(& auditpol /get /subcategory:"$($sb.G)" /r 2>$null | Where-Object { $_ } | ConvertFrom-Csv)
-            if ($csv.Count -and $csv[0].PSObject.Properties.Name -contains 'Setting Value') { $v = [int]$csv[0].'Setting Value'; $cur = $bits[$v]; $ok = (($v -band $sb.R) -eq $sb.R) }
-            elseif ($csv.Count) {
-                # Локалізований текст (EN/RU/UA): визначаємо біти за ключовими словами
-                $txt = [string]$csv[0].'Inclusion Setting'
-                $v = 0
-                if ($txt -match '(?i)success|успех|успіх') { $v = $v -bor 1 }
-                if ($txt -match '(?i)failure|сбой|збій|отказ|відмов|невдач') { $v = $v -bor 2 }
-                $cur = "$($bits[$v]) ($txt)"; $ok = (($v -band $sb.R) -eq $sb.R)
-            }
-        } catch { $cur = 'не вдалося прочитати' }
+        $ap = Get-AuditSubcategory $sb.G
+        if ($null -ne $ap.Value) { $v = [int]$ap.Value; $cur = $bits[$v]; if ($ap.Text) { $cur += " ($($ap.Text))" }; $ok = (($v -band $sb.R) -eq $sb.R) }
+        else { $cur = $(if ($ap.Text) { "не розпізнано: $($ap.Text)" } else { 'не вдалося прочитати' }) }
         $fix = ''
         if ($ok -eq $false) {
             $fix = 'auditpol /set /subcategory:"{0}"' -f $sb.G
@@ -1417,8 +1430,9 @@ if ($D.IsDC) {
             $res = $srch.FindAll()
             try { return @(foreach ($r in $res) { $r }) } finally { $res.Dispose(); $srch.Dispose() }
         }
-        function PV { param($r, [string]$n) $v = $r.Properties[$n.ToLowerInvariant()]; if ($v -and $v.Count) { return $v[0] }; return $null }
-        function FT { param($v) if ($null -eq $v -or [int64]$v -le 0 -or [int64]$v -eq [int64]::MaxValue) { return $null }; return [DateTime]::FromFileTimeUtc([int64]$v) }
+        function Get-AdProp { param($r, [string]$n) $v = $r.Properties[$n.ToLowerInvariant()]; if ($v -and $v.Count) { return $v[0] }; return $null }
+        # Увага: не називати допоміжні функції 'FT' / 'FL' тощо — це вбудовані алиаси (Format-Table), вони мають пріоритет над функціями
+        function ConvertFrom-AdFileTime { param($v) if ($null -eq $v -or [int64]$v -le 0 -or [int64]$v -eq [int64]::MaxValue) { return $null }; return [DateTime]::FromFileTimeUtc([int64]$v) }
         $enabledUser = '(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2))'
         $now = (Get-Date).ToUniversalTime()
         Add-Custody 'LDAP_QUERY' $dn 'OK' 'Початок LDAP-запитів (лише читання)'
@@ -1427,28 +1441,28 @@ if ($D.IsDC) {
         $spnU = @(Find-Ad "(&$enabledUser(servicePrincipalName=*)(!(sAMAccountName=krbtgt)))" @('sAMAccountName', 'servicePrincipalName', 'adminCount', 'pwdLastSet', 'msDS-SupportedEncryptionTypes'))
         $spnAdm = 0
         foreach ($r in $spnU) {
-            $enc = PV $r 'msDS-SupportedEncryptionTypes'; $aesOnly = ($null -ne $enc -and ([int]$enc -band 0x18) -and -not ([int]$enc -band 0x4))
-            $pls = FT (PV $r 'pwdLastSet'); $age = ''; if ($pls) { $age = [math]::Round(($now - $pls).TotalDays) }
-            $adm = ((PV $r 'adminCount') -eq 1); if ($adm) { $spnAdm++ }
-            $objs.Add([pscustomobject]@{ Category = 'Kerberoastable (користувач із SPN)'; Account = (PV $r 'sAMAccountName'); Privileged = $adm; PwdAgeDays = $age
+            $enc = Get-AdProp $r 'msDS-SupportedEncryptionTypes'; $aesOnly = ($null -ne $enc -and ([int]$enc -band 0x18) -and -not ([int]$enc -band 0x4))
+            $pls = ConvertFrom-AdFileTime (Get-AdProp $r 'pwdLastSet'); $age = ''; if ($pls) { $age = [math]::Round(($now - $pls).TotalDays) }
+            $adm = ((Get-AdProp $r 'adminCount') -eq 1); if ($adm) { $spnAdm++ }
+            $objs.Add([pscustomobject]@{ Category = 'Kerberoastable (користувач із SPN)'; Account = (Get-AdProp $r 'sAMAccountName'); Privileged = $adm; PwdAgeDays = $age
                 Details = ("SPN: {0}; шифрування: {1}" -f ((@($r.Properties['serviceprincipalname']) | Select-Object -First 3) -join ', '), $(if ($aesOnly) { 'лише AES' } else { 'RC4 дозволено' })) })
         }
         Add-AdChk 'Kerberoastable: користувачі з SPN' ("{0} (з них привілейованих: {1})" -f $spnU.Count, $spnAdm) '0 або gMSA / паролі 25+ символів, лише AES' $(if ($spnU.Count) { 'risk' } else { 'ok' }) $(if ($spnAdm) { 'Високо' } else { 'Середньо' }) 'Перевести сервіси на gMSA; довгі випадкові паролі; msDS-SupportedEncryptionTypes = 0x18 (AES)' 'Будь-який користувач домену може запросити квиток і підібрати пароль офлайн (Kerberoasting)'
 
         # ── AS-REP roasting: без Kerberos preauth ──
         $asrep = @(Find-Ad "(&$enabledUser(userAccountControl:1.2.840.113556.1.4.803:=4194304))" @('sAMAccountName', 'adminCount'))
-        foreach ($r in $asrep) { $objs.Add([pscustomobject]@{ Category = 'AS-REP roastable (без preauth)'; Account = (PV $r 'sAMAccountName'); Privileged = ((PV $r 'adminCount') -eq 1); PwdAgeDays = ''; Details = 'DONT_REQ_PREAUTH' }) }
+        foreach ($r in $asrep) { $objs.Add([pscustomobject]@{ Category = 'AS-REP roastable (без preauth)'; Account = (Get-AdProp $r 'sAMAccountName'); Privileged = ((Get-AdProp $r 'adminCount') -eq 1); PwdAgeDays = ''; Details = 'DONT_REQ_PREAUTH' }) }
         Add-AdChk 'AS-REP roastable: без Kerberos preauth' $asrep.Count '0' $(if ($asrep.Count) { 'risk' } else { 'ok' }) 'Високо' 'Set-ADAccountControl <user> -DoesNotRequirePreAuth $false (або зняти прапорець у властивостях облікового запису)' 'Хеш пароля можна отримати без жодних облікових даних (AS-REP roasting)'
 
         # ── Неконтрольоване делегування (крім DC) ──
         $unc = @(Find-Ad '(&(userAccountControl:1.2.840.113556.1.4.803:=524288)(!(userAccountControl:1.2.840.113556.1.4.803:=8192))(!(userAccountControl:1.2.840.113556.1.4.803:=2)))' @('sAMAccountName', 'objectClass'))
-        foreach ($r in $unc) { $objs.Add([pscustomobject]@{ Category = 'Неконтрольоване делегування'; Account = (PV $r 'sAMAccountName'); Privileged = ''; PwdAgeDays = ''; Details = 'TRUSTED_FOR_DELEGATION' }) }
+        foreach ($r in $unc) { $objs.Add([pscustomobject]@{ Category = 'Неконтрольоване делегування'; Account = (Get-AdProp $r 'sAMAccountName'); Privileged = ''; PwdAgeDays = ''; Details = 'TRUSTED_FOR_DELEGATION' }) }
         Add-AdChk 'Неконтрольоване делегування (не DC)' $unc.Count '0' $(if ($unc.Count) { 'risk' } else { 'ok' }) 'Високо' 'Замінити на constrained / resource-based delegation; критичні облікові записи — у Protected Users або "Account is sensitive and cannot be delegated"' 'Хост кешує TGT усіх, хто до нього підключається: компрометація = квитки адміністраторів (PrinterBug + unconstrained)'
 
         # ── krbtgt ──
         $kt = @(Find-Ad '(sAMAccountName=krbtgt)' @('pwdLastSet'))
         if ($kt.Count) {
-            $kp = FT (PV $kt[0] 'pwdLastSet'); $kd = $(if ($kp) { [math]::Round(($now - $kp).TotalDays) } else { $null })
+            $kp = ConvertFrom-AdFileTime (Get-AdProp $kt[0] 'pwdLastSet'); $kd = $(if ($kp) { [math]::Round(($now - $kp).TotalDays) } else { $null })
             Add-AdChk 'Вік пароля krbtgt' $(if ($null -ne $kd) { "{0} дн. (змінено {1})" -f $kd, $kp.ToString('yyyy-MM-dd') } else { 'невідомо' }) '≤ 180 днів; після інциденту — двічі з інтервалом' $(if ($null -eq $kd) { 'unknown' } elseif ($kd -gt 180) { 'risk' } else { 'ok' }) 'Середньо' 'Скидання krbtgt двічі з паузою ≥ часу життя квитка (скрипт Microsoft New-KrbtgtKeys.ps1)' 'Старий ключ krbtgt продовжує життя Golden Ticket'
         }
 
@@ -1456,11 +1470,11 @@ if ($D.IsDC) {
         $adm = @(Find-Ad "(&$enabledUser(adminCount=1))" @('sAMAccountName', 'userAccountControl', 'pwdLastSet', 'lastLogonTimestamp'))
         $admNoExp = 0; $admNoReq = 0
         foreach ($r in $adm) {
-            $uac = [int](PV $r 'userAccountControl'); $f = @()
+            $uac = [int](Get-AdProp $r 'userAccountControl'); $f = @()
             if ($uac -band 0x10000) { $f += 'пароль без терміну дії'; $admNoExp++ }
             if ($uac -band 0x20) { $f += 'PASSWD_NOTREQD'; $admNoReq++ }
-            $pls = FT (PV $r 'pwdLastSet'); $ll = FT (PV $r 'lastLogonTimestamp')
-            $objs.Add([pscustomobject]@{ Category = 'Привілейований (adminCount=1)'; Account = (PV $r 'sAMAccountName'); Privileged = $true
+            $pls = ConvertFrom-AdFileTime (Get-AdProp $r 'pwdLastSet'); $ll = ConvertFrom-AdFileTime (Get-AdProp $r 'lastLogonTimestamp')
+            $objs.Add([pscustomobject]@{ Category = 'Привілейований (adminCount=1)'; Account = (Get-AdProp $r 'sAMAccountName'); Privileged = $true
                 PwdAgeDays = $(if ($pls) { [math]::Round(($now - $pls).TotalDays) } else { '' })
                 Details = ("{0}; останній вхід ≈ {1}" -f $(if ($f) { $f -join ', ' } else { 'прапорці OK' }), $(if ($ll) { $ll.ToString('yyyy-MM-dd') } else { 'ніколи/невідомо' })) })
         }
@@ -1482,9 +1496,9 @@ if ($D.IsDC) {
             $gr = @(Find-Ad ("(objectSid={0})" -f $g.Sid) @('member', 'sAMAccountName'))
             if (-not $gr.Count) { continue }   # Enterprise/Schema Admins існують лише в кореневому домені лісу
             $mem = @($gr[0].Properties['member'] | ForEach-Object { ([string]$_ -split ',')[0] -replace '^CN=', '' })
-            foreach ($m in $mem) { $objs.Add([pscustomobject]@{ Category = "Член групи $($g.N)"; Account = $m; Privileged = $true; PwdAgeDays = ''; Details = "прямий член $(PV $gr[0] 'sAMAccountName')" }) }
+            foreach ($m in $mem) { $objs.Add([pscustomobject]@{ Category = "Член групи $($g.N)"; Account = $m; Privileged = $true; PwdAgeDays = ''; Details = "прямий член $(Get-AdProp $gr[0] 'sAMAccountName')" }) }
             $st = 'info'; if ($g.N -eq 'Schema Admins' -and $mem.Count) { $st = 'risk' }
-            Add-AdChk ("Склад групи {0} ({1})" -f $g.N, (PV $gr[0] 'sAMAccountName')) ("{0} прямих членів: {1}" -f $mem.Count, (($mem | Select-Object -First 10) -join ', ')) $(if ($g.N -eq 'Schema Admins') { '0 (додавати лише на час змін схеми)' } else { 'мінімум, лише іменовані адмін-облікові записи' }) $st 'Середньо' 'Прибрати зайвих членів; вкладені групи перевірити окремо' 'Кожен член — повний контроль над доменом/лісом'
+            Add-AdChk ("Склад групи {0} ({1})" -f $g.N, (Get-AdProp $gr[0] 'sAMAccountName')) ("{0} прямих членів: {1}" -f $mem.Count, (($mem | Select-Object -First 10) -join ', ')) $(if ($g.N -eq 'Schema Admins') { '0 (додавати лише на час змін схеми)' } else { 'мінімум, лише іменовані адмін-облікові записи' }) $st 'Середньо' 'Прибрати зайвих членів; вкладені групи перевірити окремо' 'Кожен член — повний контроль над доменом/лісом'
         }
 
         $D.AdConfig = Arr $rows
@@ -1843,17 +1857,9 @@ if ($D.IsDC) {
         $bits = @{ 0 = 'Немає аудиту'; 1 = 'Успіх'; 2 = 'Відмова'; 3 = 'Успіх і відмова' }
         $aud = New-Object System.Collections.Generic.List[object]
         foreach ($sb in $need) {
-            $v = $null; $cur = 'не вдалося прочитати'
-            try {
-                $csv = @(& auditpol /get /subcategory:"$($sb.G)" /r 2>$null | Where-Object { $_ } | ConvertFrom-Csv)
-                if ($csv.Count -and $csv[0].PSObject.Properties.Name -contains 'Setting Value') { $v = [int]$csv[0].'Setting Value' }
-                elseif ($csv.Count) {
-                    $txt = [string]$csv[0].'Inclusion Setting'; $v = 0
-                    if ($txt -match '(?i)success|успех|успіх') { $v = $v -bor 1 }
-                    if ($txt -match '(?i)failure|сбой|збій|отказ|відмов|невдач') { $v = $v -bor 2 }
-                }
-                if ($null -ne $v) { $cur = $bits[$v] }
-            } catch {}
+            $ap = Get-AuditSubcategory $sb.G
+            $v = $ap.Value; $cur = 'не вдалося прочитати'
+            if ($null -ne $v) { $cur = $bits[[int]$v]; if ($ap.Text) { $cur += " ($($ap.Text))" } } elseif ($ap.Text) { $cur = "не розпізнано: $($ap.Text)" }
             $ok = $(if ($null -eq $v) { $null } else { (($v -band $sb.R) -eq $sb.R) })
             $aud.Add([pscustomobject]@{ Subcategory = $sb.N; Current = $cur; Needed = $bits[$sb.R]; OK = $ok; Detects = $sb.For
                 Consequence = $(if ($ok -eq $false) { 'НЕ аудитується → відсутність подій нічого не доводить' } else { '' })
