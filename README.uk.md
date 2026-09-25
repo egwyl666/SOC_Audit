@@ -1,80 +1,13 @@
-<div align="center">
+# soc-collect.ps1 — довідник команд
 
-# 🛡️ SOC Live Response Collector
+[English](README.md) | Українська
 
-**Один PowerShell-скрипт для збору доказів і первинного аналізу Windows-хоста**
+**SOC Live Response Collector v1.4.3** — один скрипт збору доказів і первинного аналізу Windows-хоста
+(замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`). Узгоджено з **NIST SP 800-86**.
 
-[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207.x-5391FE?logo=powershell&logoColor=white)](#1-вимоги)
-[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011%20%7C%20Server%202016--2025-0078D6?logo=windows&logoColor=white)](#1-вимоги)
-[![NIST SP 800-86](https://img.shields.io/badge/NIST-SP%20800--86-2E7D32)](https://csrc.nist.gov/pubs/sp/800/86/final)
-[![Version](https://img.shields.io/badge/version-1.0-informational)](soc-collect.ps1)
-[![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#1-вимоги)
-
-[🇬🇧 English](README.md) · **🇺🇦 Українська**
-
-</div>
-
----
-
-`soc-collect.ps1` — **SOC Live Response Collector v1.0**. Замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`
-одним файлом: збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти,
-корелює їх, будує timeline і автономний HTML-звіт — з chain of custody та SHA256-маніфестом.
-Порядок і принципи роботи узгоджено з **NIST SP 800-86**.
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-### ✨ Можливості
-
-- ⚡ **Спочатку волатильні дані** — процеси, мережа, сесії, DNS/ARP
-- 🔍 **IOC-пошук** за іменами, SHA256 та IP у всіх джерелах
-- 📜 **Журнали подій** — автентифікація, RDP, служби, задачі, firewall, Defender, Sysmon, PowerShell 4104
-- 🧱 **pfirewall.log** — зведення, евристики сканування / RDP / SMB
-- 🗂️ **Артефакти** — LNK, BAM/DAM, Prefetch, кошик, MotW, історія браузерів
-
-</td>
-<td width="50%" valign="top">
-
-### 🔐 Криміналістична коректність
-
-- 🧾 **Chain of custody** — кожна дія з UTC-часом і оператором
-- #️⃣ **Hash до → копія → hash після** для кожної копії доказу
-- 🕒 **MAC-часи** фіксуються до читання й перевіряються після
-- 📦 **Маніфест SHA256** + ZIP з hash
-- 🌐 **HTML-звіт без зовнішніх ресурсів** — працює на ізольованій машині
-
-</td>
-</tr>
-</table>
-
-## ⚡ Швидкий старт
-
-```powershell
-# Адмінська консоль PowerShell
-powershell.exe -ExecutionPolicy Bypass -File C:\1\soc-collect.ps1 -CaseId INC-0922
-```
-
-Відкрийте `C:\SOC_Evidence\<CaseId>_<HOST>_<timestamp>Z\report.html` у браузері.
-
-> [!WARNING]
-> Дефолтні IOC і маски налаштовані під навчальний кейс **KMSAuto**. Для нової справи **обов'язково** передайте
-> свої `-NamePatterns`, `-IocIPs`, `-IocSha256`, `-KnownPaths` — інакше `*activ*` дасть сотні хибних спрацювань.
-
-<details>
-<summary><b>📑 Зміст</b></summary>
-
-1. [Вимоги](#1-вимоги)
-2. [Способи запуску](#2-способи-запуску)
-3. [Параметри](#3-параметри)
-4. [Типові сценарії](#4-типові-сценарії)
-5. [Етапи роботи](#5-етапи-роботи)
-6. [Результати](#6-результати)
-7. [Сумісність з PowerShell 5.1](#7-сумісність-з-powershell-51)
-8. [Усунення проблем](#8-усунення-проблем)
-9. [Обмеження](#9-обмеження-чесно)
-
-</details>
+Скрипт збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти, перевіряє
+налаштування безпеки, на контролері домену — конфігурацію AD і ознаки атак на неї. Результат — автономний HTML-звіт,
+CSV, timeline (UTC), chain of custody і маніфест SHA256. Історія змін — у [CHANGELOG](CHANGELOG.md).
 
 ---
 
@@ -82,18 +15,21 @@ powershell.exe -ExecutionPolicy Bypass -File C:\1\soc-collect.ps1 -CaseId INC-09
 
 | Що | Вимога |
 |---|---|
-| PowerShell | **Windows PowerShell 5.1** (стандарт у Windows 10/11, Server 2016+) або PowerShell 7.x |
+| PowerShell | **Windows PowerShell 5.1** (стандарт у Windows 10/11, Server 2016+) або PowerShell 7.x на Windows |
 | Права | **Адміністратор** (без них — немає Security-журналу, BAM, частини даних; скрипт попередить) |
 | ОС | Windows 10 / 11, Windows Server 2016 / 2019 / 2022 / 2025 |
 | Кодування файлу | UTF-8 **з BOM** — не перезберігайте в редакторі без BOM, інакше кирилиця в 5.1 зламається |
-| Сторонні утиліти | Не потрібні |
+| Сторонні утиліти | Не потрібні (для AD — теж: без RSAT і модуля ActiveDirectory) |
 
-> [!NOTE]
-> Перевірено: повний прогін на Windows 11 / PowerShell 5.1.26100 — **34/34 кроки без помилок**.
+Перед будь-яким записом на диск скрипт перевіряє середовище: версію PowerShell (`#Requires -Version 5.1`),
+Windows, режим `FullLanguage`. Якщо щось не так — зрозуміле повідомлення і код виходу `2`.
+32-бітний PowerShell на 64-бітній ОС при запуску через `-File` автоматично перезапускається у 64-бітному.
 
-> [!TIP]
-> Завантажуйте скрипт через **Download raw file** або `git clone` — репозиторій зберігає файл побайтно
-> (BOM + CRLF, див. `.gitattributes`). Копіювання тексту зі сторінки GitHub в редактор може втратити BOM.
+> Перевірено: v1.0 — Windows 11 / PS 5.1.26100, 34/34 кроки; v1.1–v1.3 — контролер домену (Windows Server, PS 5.1),
+> 64- і 32-біт, усі кроки OK. v1.4.1 — DC OK (кроки AD і розбір локалізованого auditpol). v1.4.2 — одне виправлення розпізнавання «Без аудита».
+
+Скачуйте скрипт через **Download raw file** або `git clone` — репозиторій зберігає файл побайтно (BOM + CRLF,
+див. `.gitattributes`). Копіювання тексту зі сторінки GitHub може втратити BOM.
 
 ---
 
@@ -119,6 +55,7 @@ powershell.exe -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((Get-C
 
 - Масиви працюють нативно через `@(...)`.
 - Hash фіксується від тексту скрипта (може відрізнятися від hash файлу через BOM/переноси — у звіті це позначено).
+- Автоперезапуск з 32 у 64 біти в цьому режимі не працює — запускайте 64-бітний `powershell.exe`.
 
 ### 2.3 З уже відкритої адмінської консолі
 
@@ -141,7 +78,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 
 ## 3. Параметри
 
-### 🗂️ Справа і час
+### Справа і час
 
 | Параметр | За замовчуванням | Опис |
 |---|---|---|
@@ -151,31 +88,32 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-Since` | зараз − `Hours` | Початок вікна, **формат ISO**: `'2026-09-22 00:00'` |
 | `-Until` | момент запуску | Кінець вікна |
 
-> [!IMPORTANT]
-> Дати — лише у форматі `yyyy-MM-dd HH:mm`. Формат `22.09.2026` PowerShell не розбере.
+> Увага: дати — лише у форматі `yyyy-MM-dd HH:mm`. Формат `22.09.2026` PowerShell не розбере.
 
-### 🎯 IOC та пошук
+### IOC та пошук
 
 | Параметр | За замовчуванням | Опис |
 |---|---|---|
 | `-NamePatterns` | `*KMS*`, `*activ*`, `*SECOPatcher*` | Маски імен файлів (пошук по дисках, LNK, BAM, Prefetch, кошик, історія браузерів) |
 | `-KnownPaths` | шляхи KMSAuto | Конкретні файли/папки: hash, підпис, MAC до/після, Zone.Identifier |
 | `-IocSha256` | hash KMSAuto++ і архіву | Шукаються у файлах, процесах, службах, Sysmon |
-| `-IocIPs` | `192.168.77.51`, `fe80::1a2b:…`, `10.9.0.20` | Шукаються в з'єднаннях, ARP/NDP, pfirewall.log, RDP, 4625, реєстрі KMS |
+| `-IocIPs` | `192.168.77.51`, `fe80::1a2b:…`, `10.9.0.20` | Шукаються в з'єднаннях, ARP/NDP, pfirewall.log, RDP, 4625, реєстрі KMS. Збіг — лише за межами адреси (`10.9.0.20` не збігається з `110.9.0.201`) |
 | `-SearchRoots` | усі локальні та знімні диски | Де шукати файли |
 | `-ExcludeDirs` | WinSxS, DriverStore, servicing… | Фрагменти шляхів, які пропускаються |
 
-### 💾 Куди зберігати
+> Увага: **для нової справи обов'язково змініть маски та IOC.** Дефолтні налаштовані під тестовий кейс KMSAuto —
+> на іншій системі `*activ*` дасть багато хибних спрацювань (Active Directory, ActiveX, `active-response` у Wazuh).
+
+### Куди зберігати
 
 | Параметр | За замовчуванням | Опис |
 |---|---|---|
 | `-OutRoot` | `C:\SOC_Evidence` | Коренева папка результатів |
 
-> [!CAUTION]
 > **NIST:** не пишіть докази на диск, який досліджуєте, — запис затирає вільне місце, де можуть бути
 > видалені файли. Для серйозних кейсів: `-OutRoot E:\Evidence` (флешка / зовнішній диск).
 
-### 📏 Ліміти
+### Ліміти
 
 | Параметр | За замовчуванням | Опис |
 |---|---|---|
@@ -183,13 +121,14 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-MaxHashMB` | `300` | Файли більші за цей розмір не хешуються |
 | `-HtmlMaxRows` | `400` | Рядків на таблицю в HTML (у CSV — завжди повні дані) |
 
-### 🎚️ Перемикачі
+### Перемикачі
 
 | Перемикач | Що робить | Коли вмикати |
 |---|---|---|
 | `-SkipWideSearch` | Без пошуку по всіх дисках | Швидкий тріаж (найдовший крок) |
 | `-SkipEvidenceCopy` | Без копій історії браузерів / Timeline / PS history / pfirewall.log | Hunting на багатьох хостах |
-| `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache через `esentutl /vss` | Глибока форензика. ⚠️ Створює тіньову копію — змінює систему (фіксується в custody) |
+| `-NoEvtx` | Без експорту оригінальних `.evtx` (крок 3.9) | Hunting / мало місця. На DC журнал Security може бути 1+ ГБ |
+| `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache через `esentutl /vss` | Глибока форензика. Увага: створює тіньову копію — змінює систему (фіксується в custody) |
 | `-UsnJournal` | Вибірка з USN-журналу за масками | Потрібно знати, коли файли створювалися/видалялися. Довго |
 | `-NoZip` | Без ZIP-архіву | Коли архів не потрібен |
 
@@ -197,78 +136,65 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 
 ## 4. Типові сценарії
 
-<details open>
-<summary><b>🚨 Повний розбір інциденту</b></summary>
+### Повний розбір інциденту
 
 ```powershell
 .\soc-collect.ps1 -CaseId INC-0922 -Analyst "Прізвище" `
   -Since '2026-09-22 00:00' -Until '2026-09-23 00:00' -OutRoot E:\Evidence
 ```
-</details>
 
-<details>
-<summary><b>⏱️ Швидкий тріаж (~1–2 хв)</b></summary>
+### Швидкий тріаж (~2–5 хв)
 
 ```powershell
-.\soc-collect.ps1 -CaseId TRIAGE-PC17 -Hours 24 -SkipWideSearch -SkipEvidenceCopy -NoZip
+.\soc-collect.ps1 -CaseId TRIAGE-PC17 -Hours 24 -SkipWideSearch -SkipEvidenceCopy -NoEvtx -NoZip
 ```
-</details>
 
-<details>
-<summary><b>🎯 Threat hunting по інших хостах (ті самі IOC)</b></summary>
+### Threat hunting по інших хостах (ті самі IOC)
 
 ```powershell
-.\soc-collect.ps1 -CaseId HUNT-PC17 -Since '2026-09-15 00:00' -SkipEvidenceCopy `
+.\soc-collect.ps1 -CaseId HUNT-PC17 -Since '2026-09-15 00:00' -SkipEvidenceCopy -NoEvtx `
   -IocIPs '192.168.77.51,10.9.0.20' -NamePatterns '*KMS*,*SECOPatcher*'
 ```
 
 Дивіться розділи **«IOC-збіги»** та **«Автентифікація / brute-force»**.
-</details>
 
-<details>
-<summary><b>🔬 Глибока форензика</b></summary>
+### Контролер домену
+
+```powershell
+.\soc-collect.ps1 -CaseId AUDIT-DC01 -Hours 72 -SkipWideSearch -OutRoot E:\Evidence
+```
+
+Кроки AD (2.10, 3.10) вмикаються автоматично, якщо хост — контролер домену. Дивіться розділи
+**«4.1 Налаштування безпеки»** і **«5.1 Active Directory»**.
+
+### Глибока форензика
 
 ```powershell
 .\soc-collect.ps1 -CaseId INC-0922-DEEP -CollectHives -UsnJournal -MaxEvents 50000 -OutRoot E:\Evidence
 ```
-</details>
 
-<details>
-<summary><b>🧪 Перевірка «чистої» системи / нова справа</b></summary>
+### Перевірка «чистої» системи / нова справа
 
 ```powershell
 .\soc-collect.ps1 -CaseId CHECK-HOME -Hours 168 -NamePatterns '*anydesk*,*rat*' -IocIPs '0.0.0.0' -KnownPaths 'C:\nonexistent'
 ```
-</details>
 
 ---
 
-## 5. Етапи роботи
-
-Порядок NIST: **спочатку волатильні дані**.
-
-```mermaid
-flowchart LR
-    A["0 · Pre-flight"] --> B["1 · Волатильні"]
-    B --> C["2 · Система"]
-    C --> D["3 · Журнали"]
-    D --> E["4 · pfirewall.log"]
-    E --> F["5 · Артефакти"]
-    F --> G["6 · Аналіз"]
-    G --> H["7–9 · Звіт"]
-    style B fill:#ffcdd2,stroke:#c62828,color:#000
-    style G fill:#fff9c4,stroke:#f9a825,color:#000
-    style H fill:#c8e6c9,stroke:#2e7d32,color:#000
-```
+## 5. Етапи роботи (порядок NIST: спочатку волатильні дані)
 
 | Етап | Що збирається |
 |---|---|
-| **0. Pre-flight** | SHA256 скрипта, час/таймзона/NTP, NTFS last-access, Prefetch, профілі користувачів |
-| **1. Волатильні** | Процеси (+hash/підпис/власник), TCP/UDP, сесії, ARP/NDP, DNS-кеш, IP/маршрути, SMB |
-| **2. Система** | Облікові записи, адміни, політики, служби, задачі (автор з XML), автозапуск, WMI, Defender, ліцензування/KMS, firewall, **журнали подій (розмір/глибина/покриття) та налаштування аудиту** |
+| **0. Pre-flight** | SHA256 скрипта, час/таймзона/NTP, NTFS last-access, Prefetch, профілі користувачів, роль хоста (станція / сервер / DC) |
+| **1. Волатильні** | Спершу швидкий знімок: `netstat -ano`, TCP, процеси, UDP. Далі ARP/NDP, DNS-кеш, IP/маршрути, SMB. Лише потім — власник/hash/підпис процесів і сесії |
+| **2. Система** | Облікові записи, адміни, політики, служби, задачі (автор з XML), автозапуск, WMI, Defender, ліцензування/KMS, firewall, журнали подій (розмір/глибина/покриття) та налаштування аудиту |
+| **2.9 Налаштування безпеки** | SMBv1 і підпис SMB, LLMNR/NetBIOS, WDigest, захист LSA (RunAsPPL), Credential Guard, LM/NTLM, UAC, RDP NLA, PowerShell v2, BitLocker, правила ASR, LAPS, обліковий запис «Гість», Print Spooler на DC, профілі firewall, давність останнього оновлення |
+| **2.10 AD: конфігурація** (лише DC) | Облікові записи під Kerberoasting і AS-REP roasting, неконтрольоване делегування, вік пароля krbtgt, прапорці привілейованих облікових записів, MachineAccountQuota, парольна політика і блокування, склад привілейованих груп |
 | **3. Журнали за вікно** | 4625/4624/4648/4740/4776, зміни облікових записів, очищення журналів, RDP (1149, 21–25, 131, 140), служби (7045/4697/7040), задачі (4698–4702, TaskScheduler), зміни firewall (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC-запуски (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 |
-| **4. pfirewall.log** | Зведення по портах і джерелах, ALLOW/DROP, first/last, евристики (ICMP-розвідка, RDP/SMB, сканування), IOC IP |
-| **5. Файлові артефакти** | Відомі шляхи, пошук за масками, LNK (з ціллю), BAM/DAM, Prefetch, кошик ($I), Zone.Identifier, копії історії браузерів / Windows Timeline / PS history з пошуком підказок |
+| **3.9 Оригінальні журнали** | Повний експорт `.evtx` (`wevtutil epl`) з SHA256 — для переаналізу Hayabusa / Chainsaw / EvtxECmd |
+| **3.10 AD: ознаки атак** (лише DC) | Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), зміни привілейованих груп, небезпечні зміни userAccountControl, 5136 (Shadow Credentials, RBCD, GPO, ACL AdminSDHolder і кореня домену). Спершу — перевірка, чи ці події взагалі аудитуються |
+| **4. pfirewall.log** | Зведення по портах і джерелах, ALLOW/DROP, first/last, евристики (ICMP-розвідка, RDP/WinRM/SSH, SMB/RPC, сканування), IOC IP |
+| **5. Файлові артефакти** | Відомі шляхи, пошук за масками, LNK (з ціллю), BAM/DAM, Prefetch, кошик ($I), Zone.Identifier, копії історії браузерів / Windows Timeline (разом з `-wal`/`-journal`) / PS history з пошуком підказок |
 | **6. Аналіз** | Зведення brute-force, кореляція 4625 ↔ firewall ↔ RDP, IOC-збіги, автоматичні прапорці |
 | **7–9. Звіт** | Timeline (UTC), HTML, chain of custody, маніфест SHA256, ZIP + hash |
 
@@ -276,36 +202,39 @@ flowchart LR
 
 ## 6. Результати
 
-```text
+```
 C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── report.html                  ← головний звіт (відкрити в браузері)
 ├── findings_auto.csv            ← автоматичні прапорці
 ├── timeline_full.csv            ← повний timeline (UTC + локальний час)
 ├── ioc_hits.csv                 ← усі IOC-збіги
-├── integrity_copies.csv         ← hash до / копія / після для кожної копії
+├── integrity_copies.csv         ← hash до / копія / після для кожної копії та експорту
 ├── chain_of_custody.log / .csv  ← кожна дія: seq, UTC, оператор, об'єкт, результат
 ├── collection_steps.csv         ← кроки збору, статус, помилки з номером рядка
-├── collection_notes.txt         ← обмеження збору (урізані журнали тощо)
+├── collection_notes.txt         ← обмеження збору (урізані журнали, вимкнений аудит тощо)
 ├── manifest.csv                 ← SHA256 кожного файлу справи
 ├── manifest.csv.sha256          ← hash маніфесту
 ├── 00_tool\                     ← копія скрипта, яким збирали
-├── 01_volatile\  02_system\  03_eventlogs\  04_firewall\  05_artifacts\
+├── 01_volatile\                 ← процеси, мережа, netstat_ano.txt, сесії
+├── 02_system\                   ← система; security_config_audit.csv; на DC — ad_config.csv, ad_risky_accounts.csv
+├── 03_eventlogs\                ← вибірки журналів; на DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
+│   └── evtx\                    ← оригінальні журнали .evtx + evtx_export.csv
+├── 04_firewall\  05_artifacts\
 └── 06_evidence_copies\          ← верифіковані копії (браузери, pfirewall.log, кущі)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
 ```
 
-> [!TIP]
-> **Для тікета:** зафіксуйте SHA256 маніфесту та архіву (виводяться в кінці) — це точка контролю цілісності.
+**Для тікета:** зафіксуйте SHA256 маніфесту та архіву (виводяться в кінці) — це точка контролю цілісності.
 
-### 📊 HTML-звіт
+### HTML-звіт
 
-- Бокове меню — 17 розділів
+- Бокове меню — 19 розділів, зокрема «4.1 Налаштування безпеки» і «5.1 Active Directory» (на DC)
 - Картки-лічильники та таблиця прапорців з рівнем (Критично / Високо / Середньо / Інфо)
 - У кожній таблиці: **фільтр** (поле пошуку) і **сортування** (клік по заголовку)
-- Підсвітка: 🟥 IOC / критично, 🟧 підозріло, 🟩 VERIFIED / OK
+- Підсвітка рядків: червоний — IOC / критично, помаранчевий — підозріло, зелений — VERIFIED / OK
+- У таблицях налаштувань: поточне значення, рекомендоване, команда виправлення і чим це загрожує
 - Повністю автономний (без зовнішніх ресурсів) — відкривається на ізольованій машині
 
-> [!NOTE]
 > Прапорці — **підказки**, не висновки. Висновок робить аналітик після перевірки кількох незалежних джерел (NIST 8.3).
 
 ---
@@ -316,9 +245,8 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 |---|---|
 | Синтаксис | Без конструкцій лише з PS7 (`??`, `?:`, `&&`, `-Parallel`) |
 | Кодування | UTF-8 з BOM — 5.1 читає кирилицю коректно |
-| Модулі | Лише вбудовані: NetSecurity, NetTCPIP, ScheduledTasks, Defender, LocalAccounts, CimCmdlets |
-| Локалізація ОС | Дані з журналів беруться з XML (не з локалізованого тексту); `auditpol` — розбір EN/RU/UA |
-| Перевірено | Windows 11 + PS 5.1.26100: 34/34 кроки OK |
+| Модулі | Лише вбудовані: NetSecurity, NetTCPIP, ScheduledTasks, Defender, LocalAccounts, CimCmdlets, SmbShare; для AD — System.DirectoryServices |
+| Локалізація ОС | Дані з журналів беруться з XML (не з локалізованого тексту); `auditpol` — розбір за позицією колонок (заголовки в RU/UA перекладені); групи AD — за SID |
 
 ---
 
@@ -326,18 +254,23 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 | Симптом | Причина / рішення |
 |---|---|
+| `ПОМИЛКА: потрібен PowerShell 5.1+` або помилка `#requires` | Встановіть WMF 5.1 або запускайте через `powershell.exe` (5.1) / `pwsh.exe` (7.x) |
+| `ПОМИЛКА: LanguageMode = ConstrainedLanguage` | PowerShell обмежено AppLocker/WDAC; запускайте з дозволеного адмін-контексту або додайте скрипт у виключення |
+| Попередження про 32-бітний PowerShell | При `-File` скрипт сам перезапускається в 64-бітному. Інакше запускайте `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` |
 | `не може бути завантажений, оскільки виконання сценаріїв вимкнено` | Додайте `-ExecutionPolicy Bypass` або `Set-ExecutionPolicy -Scope Process Bypass` |
 | Кракозябри замість кирилиці | Файл перезбережено без BOM. Збережіть як **UTF-8 with BOM** або запускайте через scriptblock з `-Encoding UTF8` |
 | `Не вдається перетворити значення … на тип System.DateTime` | Дату задано не в ISO. Використовуйте `'2026-09-22 00:00'` |
 | Список IOC розпізнано як один елемент | При `-File` — через кому в одному рядку: `'a,b,c'` |
 | Порожній Security-журнал, BAM | Запущено без прав адміністратора |
 | У звіті «досягнуто ліміту N подій» | Збільште `-MaxEvents` |
-| `COPY-ONLY` у верифікації копій | Файл був заблокований (напр. Chrome відкритий). Hash копії зафіксовано — це нормально |
+| `COPY-ONLY` у верифікації копій | Hash джерела не вдалося порахувати навіть спільним читанням. Hash копії зафіксовано |
 | `SOURCE_CHANGED` для pfirewall.log | Активний лог дописується під час копіювання — очікувано, доказ — копія |
+| `EXPORT` у верифікації для `.evtx` | Живий журнал не можна захешувати до/після — зафіксовано hash експортованого файлу |
 | Крок має статус `ПОМИЛКА` | Дивіться `collection_steps.csv`: там текст помилки і **номер рядка**. Інші кроки не зачіпаються |
+| AD: «підкатегорія аудиту не ввімкнена» | Відповідних подій не буде навіть під час атаки. Команда ввімкнення — у колонці Fix (`ad_audit_coverage.csv`) |
 | Порожній Prefetch | На Windows Server Prefetch вимкнено за замовчуванням — це не доказ відсутності запуску |
 | «Вікно розслідування не покрите» | Журнал замалий і вже перезаписав події. Команда збільшення — у колонці Advice |
-| Сотні прапорців «Програма в нестандартному шляху» | Маски/IOC від іншої справи або ігри/програми на D:/E:. Змініть `-NamePatterns` під справу |
+| Багато прапорців «Збіг з маскою IOC» | Маски/IOC від іншої справи. Змініть `-NamePatterns` під справу |
 
 ---
 
@@ -345,13 +278,9 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 - **Live response** — без write blocker і bit-stream образу. Для доказів юридичного рівня спочатку зробіть снапшот/образ VM.
 - Немає дампа оперативної пам'яті.
-- Сирі `.evtx` не експортуються — лише CSV-вибірки.
+- `.evtx` експортуються повністю (`wevtutil epl`) — це експорт, а не побайтна копія файлу журналу.
 - Історія браузерів / Timeline аналізується пошуком рядків (без SQLite) — без точних часових міток; для таймінгу відкрийте копії в DB Browser for SQLite.
+- Склад привілейованих груп AD — лише прямі члени; вкладені групи перевіряйте окремо.
+- Ознаки атак на AD видно лише тоді, коли відповідні підкатегорії аудиту ввімкнені (скрипт це перевіряє і пише у звіт).
 - Рекомендовані розміри журналів — орієнтовні (для навантажених серверів / DC Security ≥ 4 ГБ).
 - IP-адреса у кореляції — **кандидат**, не доказ ідентичності (NIST 6.4.4).
-
----
-
-<div align="center">
-<sub>Використовуйте лише на системах, які ви маєте право досліджувати. За замовчуванням скрипт лише читає дані (крім <code>-CollectHives</code>), але це live response — див. <a href="#9-обмеження-чесно">обмеження</a>.</sub>
-</div>
