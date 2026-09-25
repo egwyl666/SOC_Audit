@@ -7,7 +7,7 @@
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207.x-5391FE?logo=powershell&logoColor=white)](#1-вимоги)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011%20%7C%20Server%202016--2025-0078D6?logo=windows&logoColor=white)](#1-вимоги)
 [![NIST SP 800-86](https://img.shields.io/badge/NIST-SP%20800--86-2E7D32)](https://csrc.nist.gov/pubs/sp/800/86/final)
-[![Version](https://img.shields.io/badge/version-1.0-informational)](soc-collect.ps1)
+[![Version](https://img.shields.io/badge/version-1.1-informational)](soc-collect.ps1)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#1-вимоги)
 
 [🇬🇧 English](README.md) · **🇺🇦 Українська**
@@ -16,7 +16,7 @@
 
 ---
 
-`soc-collect.ps1` — **SOC Live Response Collector v1.0**. Замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`
+`soc-collect.ps1` — **SOC Live Response Collector v1.1**. Замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`
 одним файлом: збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти,
 корелює їх, будує timeline і автономний HTML-звіт — з chain of custody та SHA256-маніфестом.
 Порядок і принципи роботи узгоджено з **NIST SP 800-86**.
@@ -82,14 +82,15 @@ powershell.exe -ExecutionPolicy Bypass -File C:\1\soc-collect.ps1 -CaseId INC-09
 
 | Що | Вимога |
 |---|---|
-| PowerShell | **Windows PowerShell 5.1** (стандарт у Windows 10/11, Server 2016+) або PowerShell 7.x |
+| PowerShell | **Windows PowerShell 5.1** (стандарт у Windows 10/11, Server 2016+) або PowerShell 7.x на Windows, 64-бітний процес, режим `FullLanguage`. Перевіряється **до** будь-якого запису на диск (`#Requires -Version 5.1` + перевірка під час запуску, код виходу `2`) |
 | Права | **Адміністратор** (без них — немає Security-журналу, BAM, частини даних; скрипт попередить) |
 | ОС | Windows 10 / 11, Windows Server 2016 / 2019 / 2022 / 2025 |
 | Кодування файлу | UTF-8 **з BOM** — не перезберігайте в редакторі без BOM, інакше кирилиця в 5.1 зламається |
 | Сторонні утиліти | Не потрібні |
 
 > [!NOTE]
-> Перевірено: повний прогін на Windows 11 / PowerShell 5.1.26100 — **34/34 кроки без помилок**.
+> Перевірено: v1.0 — повний прогін на Windows 11 / PowerShell 5.1.26100, **34/34 кроки без помилок**.
+> v1.1 пройшла перевірку парсером і unit-тести змінених функцій; повний прогін на Windows ще попереду — див. [CHANGELOG](CHANGELOG.md).
 
 > [!TIP]
 > Завантажуйте скрипт через **Download raw file** або `git clone` — репозиторій зберігає файл побайтно
@@ -264,7 +265,7 @@ flowchart LR
 | Етап | Що збирається |
 |---|---|
 | **0. Pre-flight** | SHA256 скрипта, час/таймзона/NTP, NTFS last-access, Prefetch, профілі користувачів |
-| **1. Волатильні** | Процеси (+hash/підпис/власник), TCP/UDP, сесії, ARP/NDP, DNS-кеш, IP/маршрути, SMB |
+| **1. Волатильні** | Спочатку швидкий знімок (TCP/UDP → процеси), далі ARP/NDP, DNS-кеш, IP/маршрути, SMB; лише потім — власник/hash/підпис процесів і сесії |
 | **2. Система** | Облікові записи, адміни, політики, служби, задачі (автор з XML), автозапуск, WMI, Defender, ліцензування/KMS, firewall, **журнали подій (розмір/глибина/покриття) та налаштування аудиту** |
 | **3. Журнали за вікно** | 4625/4624/4648/4740/4776, зміни облікових записів, очищення журналів, RDP (1149, 21–25, 131, 140), служби (7045/4697/7040), задачі (4698–4702, TaskScheduler), зміни firewall (2004–2006, 2033, 2052, 2097, 2099, 4946–4950), Defender, LOLBin/IOC-запуски (Sysmon 1 / 4688), Sysmon 11/13/3, PowerShell 4104 |
 | **4. pfirewall.log** | Зведення по портах і джерелах, ALLOW/DROP, first/last, евристики (ICMP-розвідка, RDP/SMB, сканування), IOC IP |
@@ -318,7 +319,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 | Кодування | UTF-8 з BOM — 5.1 читає кирилицю коректно |
 | Модулі | Лише вбудовані: NetSecurity, NetTCPIP, ScheduledTasks, Defender, LocalAccounts, CimCmdlets |
 | Локалізація ОС | Дані з журналів беруться з XML (не з локалізованого тексту); `auditpol` — розбір EN/RU/UA |
-| Перевірено | Windows 11 + PS 5.1.26100: 34/34 кроки OK |
+| Перевірено | v1.0: Windows 11 + PS 5.1.26100, 34/34 кроки OK; v1.1: парсер + unit-тести, прогін на Windows — попереду |
 
 ---
 
@@ -326,6 +327,9 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 | Симптом | Причина / рішення |
 |---|---|
+| `ПОМИЛКА: потрібен PowerShell 5.1+` / помилка `#requires` | Встановіть WMF 5.1 або запускайте через `powershell.exe` (5.1) / `pwsh.exe` (7.x) |
+| `ПОМИЛКА: LanguageMode = ConstrainedLanguage` | PowerShell обмежено AppLocker/WDAC; запускайте з дозволеного адмін-контексту або додайте скрипт у виключення |
+| Попередження про 32-бітний PowerShell | Запускайте `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, а не з `SysWOW64` |
 | `не може бути завантажений, оскільки виконання сценаріїв вимкнено` | Додайте `-ExecutionPolicy Bypass` або `Set-ExecutionPolicy -Scope Process Bypass` |
 | Кракозябри замість кирилиці | Файл перезбережено без BOM. Збережіть як **UTF-8 with BOM** або запускайте через scriptblock з `-Encoding UTF8` |
 | `Не вдається перетворити значення … на тип System.DateTime` | Дату задано не в ISO. Використовуйте `'2026-09-22 00:00'` |

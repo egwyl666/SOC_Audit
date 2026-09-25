@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.0 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.1 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -38,7 +38,9 @@
 
 .NOTES
     Для іншої справи змінюйте лише параметри нижче (або передавайте їх при запуску).
+    Мінімальні вимоги: Windows PowerShell 5.1 або PowerShell 7.x на Windows, FullLanguage mode.
 #>
+#Requires -Version 5.1
 [CmdletBinding()]
 param(
     # ─── Ідентифікація справи ───────────────────────────────────────────────
@@ -91,12 +93,45 @@ param(
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
 
+# ─── Перевірка середовища ДО будь-яких змін на диску (NIST: не змінювати систему даремно) ───
+# #Requires вище спрацьовує при запуску файлу; ця перевірка дублює її для scriptblock / Invoke-Command
+# і дає зрозуміле повідомлення замість помилки парсера.
+$MinPsVersion = [version]'5.1'
+$EnvWarnings  = @()
+$psv = $PSVersionTable.PSVersion
+if ($psv -lt $MinPsVersion) {
+    Write-Host ("ПОМИЛКА: потрібен PowerShell {0}+, запущено {1}. Оновіть WMF 5.1 або запустіть через powershell.exe (5.1) / pwsh.exe (7.x)." -f $MinPsVersion, $psv) -ForegroundColor Red
+    exit 2
+}
+if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+    Write-Host "ПОМИЛКА: скрипт збирає артефакти Windows і працює лише на Windows." -ForegroundColor Red
+    exit 2
+}
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    Write-Host ("ПОМИЛКА: LanguageMode = {0}. Потрібен FullLanguage (обмеження AppLocker/WDAC/__PSLockdownPolicy) — .NET-виклики скрипта заблоковані." -f $ExecutionContext.SessionState.LanguageMode) -ForegroundColor Red
+    exit 2
+}
+if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+    $EnvWarnings += 'Запущено 32-бітний PowerShell на 64-бітній ОС: WOW64 перенаправляє System32 і частину реєстру — дані можуть бути неповними. Запускайте %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe.'
+}
+if ($psv.Major -eq 5 -and $psv.Minor -eq 1 -and $psv.Build -lt 14393) {
+    $EnvWarnings += ("PowerShell {0} (WMF 5.1 на старій ОС): частина модулів (LocalAccounts, NetTCPIP) може бути відсутня — кроки позначаться як ПОМИЛКА." -f $psv)
+}
+foreach ($w in $EnvWarnings) { Write-Host "УВАГА: $w" -ForegroundColor Yellow }
+
 $ToolPathTop = $PSCommandPath
 $ToolTextTop = $null
 try { if ($MyInvocation.MyCommand.ScriptBlock) { $ToolTextTop = $MyInvocation.MyCommand.ScriptBlock.ToString() } } catch {}
+# Текст самого інструмента (без CR) — щоб відрізнити власні script blocks у 4104 від дій зловмисника
+$OwnTextNorm = ''
+try {
+    if ($ToolPathTop -and (Test-Path -LiteralPath $ToolPathTop)) { $OwnTextNorm = [IO.File]::ReadAllText($ToolPathTop) }
+    elseif ($ToolTextTop) { $OwnTextNorm = $ToolTextTop }
+} catch {}
+$OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.0'
+$ToolVersion = '1.1'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -111,8 +146,6 @@ foreach ($sub in '00_tool', '01_volatile', '02_system', '03_eventlogs', '04_fire
 }
 $Operator = "$env:USERDOMAIN\$env:USERNAME"
 if ($Analyst) { $Operator = "$Analyst ($Operator)" }
-$ExcludeDirs = @($ExcludeDirs) + @(($OutRoot -replace '^[A-Za-z]:', ''))
-$Keywords = @($NamePatterns | ForEach-Object { $_.Replace('*', '').Replace('?', '').Trim() } | Where-Object { $_.Length -ge 3 } | Select-Object -Unique)
 
 # Сховища даних (reference-типи — безпечні між областями видимості)
 $D          = @{}
@@ -130,6 +163,24 @@ $CustodyLive = Join-Path $CaseDir 'chain_of_custody.log'
 function Split-ListParam { param([string[]]$v) if ($v -and $v.Count -eq 1 -and $v[0] -match ',') { return @($v[0] -split '\s*,\s*' | Where-Object { $_ }) }; return @($v) }
 $NamePatterns = Split-ListParam $NamePatterns; $KnownPaths = Split-ListParam $KnownPaths; $IocSha256 = Split-ListParam $IocSha256
 $IocIPs = Split-ListParam $IocIPs; $SearchRoots = Split-ListParam $SearchRoots; $ExcludeDirs = Split-ListParam $ExcludeDirs
+# Папку з доказами виключаємо з пошуку ПІСЛЯ розбиття списку. Якщо OutRoot — корінь диска (E:\),
+# виключаємо лише папку поточної справи, інакше '\' виключив би взагалі все.
+$OutRel = ($OutRoot -replace '^[A-Za-z]:', '').TrimEnd('\')
+if (-not $OutRel) { $OutRel = ($CaseDir -replace '^[A-Za-z]:', '').TrimEnd('\') }
+$ExcludeDirs = @(@($ExcludeDirs) + @($OutRel) | Where-Object { $_ -and $_ -ne '\' })
+
+# IOC IP: множина для точного порівняння + regex з межами адреси для пошуку в тексті
+$IocIpSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+$ipParts  = @()
+foreach ($ip in @($IocIPs)) {
+    $n = ($ip.Trim().Trim('[', ']') -replace '%.*$', '').ToLowerInvariant()
+    if (-not $n) { continue }
+    [void]$IocIpSet.Add($n)
+    if ($n.Contains(':')) { $ipParts += ('(?<![0-9a-f:])' + [regex]::Escape($n) + '(?![0-9a-f:])') }   # IPv6
+    else { $ipParts += ('(?<![\d.])' + [regex]::Escape($n) + '(?!\d|\.\d)') }                          # IPv4 (порт після ':' — допустимо)
+}
+$IocIpRx = $null
+if ($ipParts.Count) { $IocIpRx = New-Object Text.RegularExpressions.Regex (($ipParts -join '|'), ([Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::Compiled)) }
 
 $Keywords = @($NamePatterns | ForEach-Object { $_.Replace('*', '').Replace('?', '').Trim() } | Where-Object { $_.Length -ge 3 } | Select-Object -Unique)
 if (-not $env:SystemRoot)  { $env:SystemRoot  = 'C:\Windows' }
@@ -141,7 +192,7 @@ if ($SearchRootsFinal.Count -eq 0) {
     catch { $SearchRootsFinal = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Where-Object { $_.Root -match '^[A-Za-z]:\\$' } | ForEach-Object { $_.Root }) }
 }
 
-$DataKeys = 'Procs','Tcp','Udp','Arp','Dns','IpAddr','Routes','SmbSess','SmbOpen','SmbShares','Profiles','ProfileRoots',
+$DataKeys = 'TcpRaw','UdpRaw','ProcRaw','Procs','Tcp','Udp','Arp','Dns','IpAddr','Routes','SmbSess','SmbOpen','SmbShares','Profiles','ProfileRoots',
             'LocalUsers','LocalAdmins','Services','Tasks','Autoruns','WmiPersist','MpExclusions','MpStatusRows','Licensing','KmsReg',
             'FwProfiles','FwRules','Ev4625','Ev4624','OtherAuth','LogCleared','Rdp','RdpSummary','SvcEvents','TaskEvents',
             'FwEvents','MpEvents','Exec','SysmonMisc','Ps4104','FwByPort','FwBySource','FwIocRaw','FwSvcHits','KnownFiles',
@@ -259,11 +310,20 @@ function Test-KwMatch {
     foreach ($k in $Keywords) { if ($s.IndexOf($k, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true } }
     return $false
 }
-function Test-IocIP {
+function Get-NormIP {   # '[fe80::1%12]' -> 'fe80::1'; регістр не важливий
+    param([string]$ip)
+    if (-not $ip) { return '' }
+    return ($ip.Trim().Trim('[', ']') -replace '%.*$', '').ToLowerInvariant()
+}
+function Test-IocIP {   # IOC IP у довільному тексті — лише по межах адреси (10.9.0.20 ≠ 110.9.0.201 / 10.9.0.200)
     param([string]$s)
-    if (-not $s) { return $false }
-    foreach ($ip in $IocIPs) { if ($ip -and $s.IndexOf($ip, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true } }
-    return $false
+    if (-not $s -or -not $IocIpRx) { return $false }
+    return $IocIpRx.IsMatch($s)
+}
+function Test-IocIPEq {   # точне порівняння одного значення-адреси з IOC
+    param([string]$ip)
+    if (-not $ip) { return $false }
+    return $IocIpSet.Contains((Get-NormIP $ip))
 }
 function Test-PrivateIP {
     param([string]$ip)
@@ -429,19 +489,35 @@ function Read-SharedLines {
 }
 
 function Get-StringHints {   # URL/шляхи з ключовими словами у бінарних БД (History, ActivitiesCache) — без SQLite
+    # Читання блоками по 4 МБ з перекриттям: пам'ять не залежить від розміру БД (раніше — ReadAllBytes на весь файл)
     param([string]$Path, [int]$Max = 300)
     $out = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     if (-not $Keywords -or -not (Test-Path -LiteralPath $Path)) { return @() }
-    $bytes = $null
-    try { $bytes = [IO.File]::ReadAllBytes($Path) } catch { return @() }
     $rx = New-Object Text.RegularExpressions.Regex('(?i)(https?://[^\s"''<>\x00-\x1f]{4,400}|\b[a-z]:\\(?:[^\x00-\x1f"<>|*?\\/:]{1,120}\\){0,15}[^\x00-\x1f"<>|*?\\/:]{1,120}?\.(?:exe|dll|sys|rar|zip|7z|ini|cfg|ps1|bat|cmd|vbs|js|lnk|msi|iso|img|txt|log|reg)\b)')
-    foreach ($enc in @([Text.Encoding]::UTF8, [Text.Encoding]::Unicode)) {
-        $txt = $enc.GetString($bytes)
-        foreach ($m in $rx.Matches($txt)) {
-            if ($out.Count -ge $Max) { break }
-            if (Test-KwMatch $m.Value) { [void]$out.Add($m.Value.Trim()) }
+    $chunk = 4MB; $overlap = 8KB   # обидва парні — UTF-16 декодується з вирівняної позиції
+    $buf = New-Object byte[] ($chunk + $overlap + 2)
+    $fs = $null
+    try { $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite) } catch { return @() }
+    try {
+        $carry = 0; $pos = [int64]0   # $pos — зміщення buf[0] у файлі
+        while ($out.Count -lt $Max) {
+            $n = $fs.Read($buf, $carry, $chunk)
+            if ($n -le 0) { break }
+            $len = $carry + $n
+            foreach ($enc in @([Text.Encoding]::UTF8, [Text.Encoding]::Unicode)) {
+                $txt = $enc.GetString($buf, 0, $len)
+                foreach ($m in $rx.Matches($txt)) {
+                    if ($out.Count -ge $Max) { break }
+                    if (Test-KwMatch $m.Value) { [void]$out.Add($m.Value.Trim()) }
+                }
+            }
+            # хвіст блоку переносимо на початок — рядок на межі блоків не загубиться
+            $carry = [Math]::Min($overlap, $len)
+            if ((($pos + $len - $carry) % 2) -ne 0 -and $carry -lt $len) { $carry++ }   # зберегти парне вирівнювання
+            $pos += ($len - $carry)
+            [Array]::Copy($buf, $len - $carry, $buf, 0, $carry)
         }
-    }
+    } catch {} finally { $fs.Close() }
     return @($out)
 }
 
@@ -507,7 +583,11 @@ function Get-Ev {
         elseif ($fq -like 'NoMatchingLogsFound*') { Add-Note "Журнал відсутній або вимкнений: $Log"; $res = @() }
         else { Add-Note ("Не вдалося прочитати {0} [{1}]: {2}" -f $Log, ($Id -join ','), $_.Exception.Message); $res = @() }
     }
-    if ($res.Count -ge $MaxEvents) { Add-Note ("УВАГА: {0} [{1}] — досягнуто ліміту {2} подій, збережено лише найновіші (збільште -MaxEvents)." -f $Log, ($Id -join ','), $MaxEvents) }
+    if ($res.Count -ge $MaxEvents) {
+        # Get-WinEvent віддає від найновіших: усе, що старше за останній елемент, у вибірку не потрапило
+        $keptFrom = ''; try { $keptFrom = U $res[$res.Count - 1].TimeCreated } catch {}
+        Add-Note ("УВАГА: {0} [{1}] — досягнуто ліміту {2} подій: збережено лише події з {3}, раніші за вікно {4} ВТРАЧЕНО з вибірки (збільште -MaxEvents)." -f $Log, ($Id -join ','), $MaxEvents, $keptFrom, (U $Since))
+    }
     Add-Custody 'READ_EVENTLOG' ("{0} [{1}]" -f $Log, ($Id -join ',')) 'OK' ("{0} подій" -f $res.Count)
     return $res
 }
@@ -516,7 +596,10 @@ function Get-EvXPath {
     $res = @()
     try { $res = @(Get-WinEvent -LogName $Log -FilterXPath $XPath -MaxEvents $MaxEvents -ErrorAction Stop) }
     catch { if ([string]$_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { Add-Note ("Не вдалося прочитати {0} ({1}): {2}" -f $Log, $Label, $_.Exception.Message) } }
-    if ($res.Count -ge $MaxEvents) { Add-Note ("УВАГА: {0} ({1}) — досягнуто ліміту {2} подій." -f $Log, $Label, $MaxEvents) }
+    if ($res.Count -ge $MaxEvents) {
+        $keptFrom = ''; try { $keptFrom = U $res[$res.Count - 1].TimeCreated } catch {}
+        Add-Note ("УВАГА: {0} ({1}) — досягнуто ліміту {2} подій: збережено лише події з {3}, раніші ВТРАЧЕНО з вибірки (збільште -MaxEvents)." -f $Log, $Label, $MaxEvents, $keptFrom)
+    }
     Add-Custody 'READ_EVENTLOG' ("{0} ({1})" -f $Log, $Label) 'OK' ("{0} подій" -f $res.Count)
     return $res
 }
@@ -562,12 +645,32 @@ function Get-ExecReason {
 }
 function Get-Sha256FromHashes { param([string]$h) if ($h -match '(?i)SHA256=([0-9a-f]{64})') { return $Matches[1].ToUpper() }; return '' }
 
+# Інтерпретатори/проксі-запуску, якими маскують задачі під \Microsoft\ (бінарник системний, шкідливе — в аргументах)
+$TaskInterpreters = @('powershell.exe','pwsh.exe','cmd.exe','mshta.exe','wscript.exe','cscript.exe','rundll32.exe','regsvr32.exe',
+                      'certutil.exe','bitsadmin.exe','msbuild.exe','installutil.exe','regasm.exe','forfiles.exe','conhost.exe')
+function Get-MsTaskSuspicion {   # чому задача під \Microsoft\ НЕ схожа на штатну ('' = штатна)
+    param([string]$Exe, [string]$Actions, [string]$Author, [string]$Actor = '')
+    $r = @()
+    $cls = Get-PathClass $Exe
+    if ($Exe -and $cls -in @('Нестандартний', 'Користувацький/тимчасовий')) { $r += "дія: $cls" }
+    $why = Get-ExecReason $Exe $Actions ''
+    if ($why -match 'IOC|Підозрілі') { $r += $why }
+    $leaf = ''; if ($Exe) { $leaf = [IO.Path]::GetFileName($Exe).ToLowerInvariant() }
+    $msAuthor = (-not $Author) -or $Author -match '^(?i)(\$\(@|Microsoft|Корпорация Майкрософт|Корпорація Майкрософт)'
+    if ($TaskInterpreters -contains $leaf -and -not $msAuthor) { $r += "інтерпретатор $leaf, автор '$Author'" }
+    # службові облікові записи (SYSTEM, LOCAL/NETWORK SERVICE, комп'ютерні акаунти NAME$) — штатне оновлення задач
+    $svcActor = '(?i)^(S-1-5-(18|19|20)|NT AUTHORITY\\.*|.*\\?(SYSTEM|СИСТЕМА|LOCAL SERVICE|NETWORK SERVICE)|.*\$)$'
+    if ($Actor -and $Actor -notmatch $svcActor) { $r += "зареєстровано/змінено користувачем $Actor" }
+    return ($r -join '; ')
+}
+
 Write-Host ""
 Write-Host "═══ $ToolName v$ToolVersion ═══" -ForegroundColor White
 Write-Host ("Справа: {0} | Хост: {1} | Оператор: {2}" -f $CaseId, $HostName, $Operator)
 Write-Host ("Вікно подій: {0} → {1} (локальний час)" -f $Since.ToString('yyyy-MM-dd HH:mm:ss'), $Until.ToString('yyyy-MM-dd HH:mm:ss'))
 Write-Host ("Результати: {0}" -f $CaseDir)
 if (-not $IsAdmin) { Write-Host "УВАГА: запуск БЕЗ прав адміністратора — Security-журнал, BAM, частина даних будуть недоступні." -ForegroundColor Red; Add-Note "Скрипт запущено без прав адміністратора — частина джерел недоступна." }
+foreach ($w in $EnvWarnings) { Add-Note $w }
 Add-Custody 'START' $HostName 'OK' ("Case={0}; Window={1}..{2}; Admin={3}" -f $CaseId, (U $Since), (U $Until), $IsAdmin)
 
 # ════════════════════════════════════ 0. PRE-FLIGHT ════════════════════════════════════
@@ -663,8 +766,47 @@ Invoke-Step "0. Pre-flight: версія інструмента, час, про�
 }
 
 # ════════════════════════════════════ 1. ВОЛАТИЛЬНІ ДАНІ (NIST 5.1.2 — першими) ════════════════════════════════════
-Invoke-Step "1.1 Процеси (командний рядок, власник, батьківський процес, hash, підпис)" {
-    $procs = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+Invoke-Step "1.1 Швидкий знімок: мережеві з'єднання, потім процеси (без hash — щоб не втратити летючі дані)" {
+    # NIST 5.1.2: спочатку найлетючіше. Збагачення (власник, hash, підпис) — окремими кроками нижче, по знімку.
+    $t0 = (Get-Date).ToUniversalTime()
+    $errs = @()   # збій одного джерела не повинен зірвати знімок інших
+    try { $D.TcpRaw  = Arr (Get-NetTCPConnection -ErrorAction Stop) } catch { $errs += "TCP: $($_.Exception.Message)" }
+    try { $D.UdpRaw  = Arr (Get-NetUDPEndpoint -ErrorAction Stop) } catch { $errs += "UDP: $($_.Exception.Message)" }
+    try { $D.ProcRaw = Arr (Get-CimInstance Win32_Process -ErrorAction Stop) } catch { $errs += "Процеси: $($_.Exception.Message)" }
+    $D.SnapshotUtc = $t0.ToString('yyyy-MM-dd HH:mm:ss.fff') + 'Z'
+    Add-Custody 'VOLATILE_SNAPSHOT' 'TCP/UDP/процеси' $(if ($errs) { 'PARTIAL' } else { 'OK' }) ("TCP {0}, UDP {1}, процесів {2}; знято за {3:N1} с" -f @($D.TcpRaw).Count, @($D.UdpRaw).Count, @($D.ProcRaw).Count, ((Get-Date).ToUniversalTime() - $t0).TotalSeconds)
+    if ($errs) { throw ($errs -join ' | ') }
+}
+
+Invoke-Step "1.2 ARP/NDP-сусіди, DNS-кеш, IP-конфігурація, маршрути" {
+    $arp = foreach ($n in @(Get-NetNeighbor -ErrorAction SilentlyContinue | Where-Object { $_.State -notin @('Unreachable', 'Permanent') })) {
+        [pscustomobject]@{ IPAddress = $n.IPAddress; MAC = $n.LinkLayerAddress; State = [string]$n.State; Family = [string]$n.AddressFamily; Interface = $n.InterfaceAlias; IocIP = (Test-IocIPEq $n.IPAddress) }
+    }
+    $D.Arp = Arr ($arp | Sort-Object @{ Expression = { -not $_.IocIP } }, Family, IPAddress)
+    Save-Csv $D.Arp '01_volatile\arp_ndp_neighbors.csv'
+    $dns = foreach ($c in @(Get-DnsClientCache -ErrorAction SilentlyContinue)) {
+        [pscustomobject]@{ Entry = $c.Entry; Name = $c.Name; Data = $c.Data; Type = $c.Type; TTL = $c.TimeToLive; Match = ((Test-KwMatch "$($c.Entry) $($c.Data)") -or (Test-IocIP $c.Data)) }
+    }
+    $D.Dns = Arr $dns
+    Save-Csv $D.Dns '01_volatile\dns_cache.csv'
+    $D.IpAddr = Arr (Get-NetIPAddress -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ IPAddress = $_.IPAddress; Prefix = $_.PrefixLength; Family = [string]$_.AddressFamily; Interface = $_.InterfaceAlias; Origin = [string]$_.PrefixOrigin } })
+    Save-Csv $D.IpAddr '01_volatile\ip_addresses.csv'
+    $D.Routes = Arr (Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Destination = $_.DestinationPrefix; NextHop = $_.NextHop; Interface = $_.InterfaceAlias; Metric = $_.RouteMetric } })
+    Save-Csv $D.Routes '01_volatile\routes_ipv4.csv'
+    $D.OwnIPs = @(@($D.IpAddr | ForEach-Object { $_.IPAddress }) + @('127.0.0.1', '::1'))
+}
+
+Invoke-Step "1.3 SMB: сесії, відкриті файли, шари" {
+    $D.SmbSess   = Arr (Get-SmbSession -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Client = $_.ClientComputerName; User = $_.ClientUserName; Opens = $_.NumOpens; Seconds = $_.SecondsExists; Dialect = $_.Dialect } })
+    $D.SmbOpen   = Arr (Get-SmbOpenFile -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Client = $_.ClientComputerName; User = $_.ClientUserName; Path = $_.Path } })
+    $D.SmbShares = Arr (Get-SmbShare -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.Path; Description = $_.Description } })
+    Save-Csv $D.SmbSess '01_volatile\smb_sessions.csv'
+    Save-Csv $D.SmbOpen '01_volatile\smb_open_files.csv'
+    Save-Csv $D.SmbShares '01_volatile\smb_shares.csv'
+}
+
+Invoke-Step "1.4 Процеси зі знімка: власник, батьківський процес, hash, підпис" {
+    $procs = @($D.ProcRaw)
     $byPid = @{}; foreach ($p in $procs) { $byPid[[int]$p.ProcessId] = $p.Name }
     $rows = foreach ($p in $procs) {
         $owner = ''
@@ -687,21 +829,21 @@ Invoke-Step "1.1 Процеси (командний рядок, власник, 
     Save-Csv $D.Procs '01_volatile\processes.csv'
 }
 
-Invoke-Step "1.2 Мережеві з'єднання TCP/UDP (з процесом-власником)" {
+Invoke-Step "1.5 Мережеві з'єднання TCP/UDP зі знімка (з процесом-власником)" {
     $pn = @{}; foreach ($p in @($D.Procs)) { $pn[[int]$p.PID] = $p }
-    $tcp = foreach ($c in @(Get-NetTCPConnection -ErrorAction Stop)) {
+    $tcp = foreach ($c in @($D.TcpRaw)) {
         $pr = $pn[[int]$c.OwningProcess]
         [pscustomobject]@{
             State = [string]$c.State; LocalAddress = $c.LocalAddress; LocalPort = $c.LocalPort
             RemoteAddress = $c.RemoteAddress; RemotePort = $c.RemotePort; PID = $c.OwningProcess
             Process = $(if ($pr) { $pr.Name } else { '' }); ProcessPath = $(if ($pr) { $pr.Path } else { '' })
             Signature = $(if ($pr) { $pr.Signature } else { '' }); CreatedLocal = (L $c.CreationTime)
-            RemoteIsPublic = (-not (Test-PrivateIP $c.RemoteAddress)); IocIP = ($IocIPs -contains $c.RemoteAddress)
+            RemoteIsPublic = (-not (Test-PrivateIP $c.RemoteAddress)); IocIP = (Test-IocIPEq $c.RemoteAddress)
         }
     }
     $D.Tcp = Arr ($tcp | Sort-Object @{ Expression = { if ($_.State -eq 'Established') { 0 } elseif ($_.State -eq 'Listen') { 1 } else { 2 } } }, RemoteAddress)
     Save-Csv $D.Tcp '01_volatile\tcp_connections.csv'
-    $udp = foreach ($u in @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue)) {
+    $udp = foreach ($u in @($D.UdpRaw)) {
         $pr = $pn[[int]$u.OwningProcess]
         [pscustomobject]@{ LocalAddress = $u.LocalAddress; LocalPort = $u.LocalPort; PID = $u.OwningProcess; Process = $(if ($pr) { $pr.Name } else { '' }); ProcessPath = $(if ($pr) { $pr.Path } else { '' }) }
     }
@@ -709,39 +851,12 @@ Invoke-Step "1.2 Мережеві з'єднання TCP/UDP (з процесом
     Save-Csv $D.Udp '01_volatile\udp_endpoints.csv'
 }
 
-Invoke-Step "1.3 Сесії користувачів (quser + власники explorer.exe)" {
+Invoke-Step "1.6 Сесії користувачів (quser + власники explorer.exe)" {
     $q = ''
     try { $q = ((& quser 2>&1) | Out-String) } catch { $q = "quser недоступний: $($_.Exception.Message)" }
     $expl = @($D.Procs | Where-Object { $_.Name -eq 'explorer.exe' } | ForEach-Object { "explorer.exe PID {0} — {1} — старт {2}" -f $_.PID, $_.Owner, $_.StartUtc })
     $D.SessionsText = ($q.Trim() + [Environment]::NewLine + [Environment]::NewLine + 'Інтерактивні оболонки:' + [Environment]::NewLine + ($expl -join [Environment]::NewLine))
     Save-Text $D.SessionsText '01_volatile\sessions.txt'
-}
-
-Invoke-Step "1.4 ARP/NDP-сусіди, DNS-кеш, IP-конфігурація, маршрути" {
-    $arp = foreach ($n in @(Get-NetNeighbor -ErrorAction SilentlyContinue | Where-Object { $_.State -notin @('Unreachable', 'Permanent') })) {
-        [pscustomobject]@{ IPAddress = $n.IPAddress; MAC = $n.LinkLayerAddress; State = [string]$n.State; Family = [string]$n.AddressFamily; Interface = $n.InterfaceAlias; IocIP = ($IocIPs -contains $n.IPAddress) }
-    }
-    $D.Arp = Arr ($arp | Sort-Object @{ Expression = { -not $_.IocIP } }, Family, IPAddress)
-    Save-Csv $D.Arp '01_volatile\arp_ndp_neighbors.csv'
-    $dns = foreach ($c in @(Get-DnsClientCache -ErrorAction SilentlyContinue)) {
-        [pscustomobject]@{ Entry = $c.Entry; Name = $c.Name; Data = $c.Data; Type = $c.Type; TTL = $c.TimeToLive; Match = ((Test-KwMatch "$($c.Entry) $($c.Data)") -or (Test-IocIP $c.Data)) }
-    }
-    $D.Dns = Arr $dns
-    Save-Csv $D.Dns '01_volatile\dns_cache.csv'
-    $D.IpAddr = Arr (Get-NetIPAddress -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ IPAddress = $_.IPAddress; Prefix = $_.PrefixLength; Family = [string]$_.AddressFamily; Interface = $_.InterfaceAlias; Origin = [string]$_.PrefixOrigin } })
-    Save-Csv $D.IpAddr '01_volatile\ip_addresses.csv'
-    $D.Routes = Arr (Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Destination = $_.DestinationPrefix; NextHop = $_.NextHop; Interface = $_.InterfaceAlias; Metric = $_.RouteMetric } })
-    Save-Csv $D.Routes '01_volatile\routes_ipv4.csv'
-    $D.OwnIPs = @(@($D.IpAddr | ForEach-Object { $_.IPAddress }) + @('127.0.0.1', '::1'))
-}
-
-Invoke-Step "1.5 SMB: сесії, відкриті файли, шари" {
-    $D.SmbSess   = Arr (Get-SmbSession -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Client = $_.ClientComputerName; User = $_.ClientUserName; Opens = $_.NumOpens; Seconds = $_.SecondsExists; Dialect = $_.Dialect } })
-    $D.SmbOpen   = Arr (Get-SmbOpenFile -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Client = $_.ClientComputerName; User = $_.ClientUserName; Path = $_.Path } })
-    $D.SmbShares = Arr (Get-SmbShare -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.Path; Description = $_.Description } })
-    Save-Csv $D.SmbSess '01_volatile\smb_sessions.csv'
-    Save-Csv $D.SmbOpen '01_volatile\smb_open_files.csv'
-    Save-Csv $D.SmbShares '01_volatile\smb_shares.csv'
 }
 
 # ════════════════════════════════════ 2. СИСТЕМА ТА ПЕРСИСТЕНТНІСТЬ ════════════════════════════════════
@@ -797,14 +912,16 @@ Invoke-Step "2.3 Задачі планувальника: автор (з XML з�
         $firstExe = ''
         foreach ($a in @($t.Actions)) { if ($a.Execute) { $firstExe = [Environment]::ExpandEnvironmentVariables(([string]$a.Execute).Trim('"')); break } }
         $cls = Get-PathClass $firstExe
-        if ($isMs -and $cls -notin @('Нестандартний', 'Користувацький/тимчасовий')) { continue }
+        # \Microsoft\* пропускаємо лише якщо задача виглядає штатною (маскування під системну — класичний прийом)
+        $msWhy = ''
+        if ($isMs) { $msWhy = Get-MsTaskSuspicion $firstExe ($acts -join ' ') ([string]$t.Author); if (-not $msWhy) { continue } }
         $info = $null; try { $info = Get-ScheduledTaskInfo -InputObject $t -ErrorAction Stop } catch {}
         $trig = @($t.Triggers | ForEach-Object {
             $n = ([string]$_.CimClass.CimClassName) -replace '^MSFT_Task', '' -replace 'Trigger$', ''
             if ($_.StartBoundary) { "$n від $($_.StartBoundary)" } else { $n } }) -join ' | '
         $bi = $null; if ($firstExe) { $bi = Get-BinInfo $firstExe }
         $flag = @()
-        if (-not $isMs) { $flag += 'Стороння задача' }
+        if (-not $isMs) { $flag += 'Стороння задача' } else { $flag += "Маскування під \Microsoft\: $msWhy" }
         if ($cls -in @('Нестандартний', 'Користувацький/тимчасовий')) { $flag += "Дія: $cls" }
         if (Test-KwMatch "$($t.TaskName) $($t.Author) $($acts -join ' ')") { $flag += 'Збіг з маскою IOC' }
         if ($bi -and $bi.SHA256 -and $IocSha256 -contains $bi.SHA256) { $flag += 'IOC HASH' }
@@ -1135,7 +1252,7 @@ Invoke-Step "3.2 RDP: 1149 (NLA), 21-25/39/40 (сесії), 131/140 (RdpCoreTS �
     Save-Csv $D.Rdp '03_eventlogs\rdp_events.csv'
     $sum = @($D.Rdp | Where-Object { $_.SourceIP } | Group-Object SourceIP | ForEach-Object {
         $g = @($_.Group | Sort-Object TimeUtc)
-        [pscustomobject]@{ SourceIP = $_.Name; IocIP = ($IocIPs -contains $_.Name)
+        [pscustomobject]@{ SourceIP = $_.Name; IocIP = (Test-IocIPEq $_.Name)
             'TCP-зєднання (131)' = @($g | Where-Object { $_.EventId -eq 131 }).Count; 'Невдалі креденшали (140)' = @($g | Where-Object { $_.EventId -eq 140 }).Count
             'NLA успішно (1149)' = @($g | Where-Object { $_.EventId -eq 1149 }).Count; 'Входи/перепідкл. (21/25)' = @($g | Where-Object { $_.EventId -in 21, 25 }).Count
             Users = ((@($g | Where-Object { $_.User } | ForEach-Object { $_.User }) | Select-Object -Unique) -join ', ')
@@ -1186,7 +1303,13 @@ Invoke-Step "3.4 Задачі: 4698-4702 (Security) + TaskScheduler/Operational 
     }
     foreach ($e in (Get-Ev 'Microsoft-Windows-TaskScheduler/Operational' @(106, 140, 141, 200, 201))) {
         $d = Get-EvData $e
-        if ([string]$d['TaskName'] -like '\Microsoft\*') { continue }
+        if ([string]$d['TaskName'] -like '\Microsoft\*') {
+            # штатні задачі Windows — шум; лишаємо ті, що зареєстровані/змінені користувачем або запускають інтерпретатор/нестандартний шлях
+            $actor = [string]$(if ($d['UserContext']) { $d['UserContext'] } else { $d['UserName'] })
+            if ($e.Id -in 200, 201) { $actor = '' }
+            $exe = Get-ExeFromCmd ([string]$d['ActionName'])
+            if (-not (Get-MsTaskSuspicion $exe ([string]$d['ActionName']) 'Microsoft' $actor)) { continue }
+        }
         $rows.Add([pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = $e.Id; Meaning = $mean[[int]$e.Id]; TaskName = $d['TaskName']
             Actor = $(if ($d['UserContext']) { $d['UserContext'] } else { $d['UserName'] }); Author = ''; Command = $d['ActionName']; Result = $d['ResultCode'] })
     }
@@ -1280,14 +1403,19 @@ Invoke-Step "3.7 Запуск процесів за LOLBin/IOC (Sysmon 1, Securi
 
 Invoke-Step "3.8 PowerShell 4104 (Script Block Logging) — підозрілі блоки" {
     $rx = '(?i)(add-mppreference|set-mppreference|msft_mppreference|downloadstring|downloadfile|invoke-webrequest|\biex\b|invoke-expression|frombase64string|net\.webclient|bitsadmin|certutil|slmgr|advfirewall|new-netfirewallrule|clear-eventlog|wevtutil|reg\s+add|schtasks|new-service|sc\.exe\s+create)'
+    $selfSkipped = 0
     $rows = foreach ($e in (Get-Ev 'Microsoft-Windows-PowerShell/Operational' @(4104))) {
         $d = Get-EvData $e
         $txt = [string]$d['ScriptBlockText']
         if (-not ($txt -match $rx -or (Test-KwMatch $txt) -or (Test-IocIP $txt))) { continue }
+        # Власний код коллектора: той самий файл або фрагмент його тексту (4104 ділить великі скрипти на частини)
+        $txtN = $txt.Replace("`r", '').Trim()
+        if (($ToolPathTop -and [string]$d['Path'] -eq $ToolPathTop) -or ($OwnTextNorm -and $txtN.Length -ge 40 -and $OwnTextNorm.Contains($txtN))) { $selfSkipped++; continue }
         $snip = $txt; if ($snip.Length -gt 600) { $snip = $snip.Substring(0, 600) + '…' }
         [pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); ScriptBlockId = $d['ScriptBlockId']; Path = $d['Path']; Part = ("{0}/{1}" -f $d['MessageNumber'], $d['MessageTotal']); Snippet = $snip }
     }
     $D.Ps4104 = Arr ($rows | Sort-Object TimeUtc)
+    if ($selfSkipped) { Add-Note ("4104: пропущено {0} script block(ів), що є текстом самого коллектора (збіг шляху або вмісту) — щоб не давати хибних прапорців." -f $selfSkipped) }
     Save-Csv $D.Ps4104 '03_eventlogs\powershell_4104_suspicious.csv'
 }
 
@@ -1338,7 +1466,7 @@ Invoke-Step "4. pfirewall.log: зведення по портах і джере�
             if ($proto -like 'ICMP*') { $s.Icmp++ }
             [void]$s.Ports.Add($dport); [void]$s.Protos.Add($proto); [void]$s.Dsts.Add($dst); if ($dir) { [void]$s.Dirs.Add($dir) }
             if ($t -lt $s.First) { $s.First = $t }; if ($t -gt $s.Last) { $s.Last = $t }
-            if (($IocIPs -contains $src -or $IocIPs -contains $dst) -and $iocRaw.Count -lt 5000) {
+            if (($IocIpSet.Contains($src) -or $IocIpSet.Contains($dst)) -and $iocRaw.Count -lt 5000) {
                 $iocRaw.Add([pscustomobject]@{ TimeLocal = $t.ToString('yyyy-MM-dd HH:mm:ss'); TimeUtc = (U $t); Action = $act; Protocol = $proto; Src = $src; SrcPort = $c[$ix['src-port']]; Dst = $dst; DstPort = $dport; Direction = $dir; Raw = $line })
             }
             if ($svcPorts -contains $dport -and $own -notcontains $src -and $svcHits.Count -lt 50000) {
@@ -1358,7 +1486,7 @@ Invoke-Step "4. pfirewall.log: зведення по портах і джере�
         $v = $_.Value; $ip = $_.Key; $isOwn = ($own -contains $ip)
         $h = @()
         if (-not $isOwn) {
-            if ($IocIPs -contains $ip) { $h += 'IOC IP' }
+            if (Test-IocIPEq $ip) { $h += 'IOC IP' }
             if ($v.Icmp -ge 20) { $h += ("ICMP ×{0} — можлива розвідка (ping sweep)" -f $v.Icmp) }
             if (@($v.Ports | Where-Object { $_ -in '3389', '445', '139', '135', '5985', '5986', '22' }).Count -gt 0) { $h += 'Звернення до RDP/SMB/RPC/WinRM/SSH' }
             if ($v.Drop -ge 20) { $h += ("Багато DROP ({0})" -f $v.Drop) }
@@ -1530,16 +1658,16 @@ if (-not $SkipEvidenceCopy) {
                 $root = Join-Path $p.Path $b.P
                 foreach ($prof in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' })) {
                     $h = Join-Path $prof.FullName 'History'
-                    if (Test-Path -LiteralPath $h) { $targets.Add(@{ Kind = "$($b.N) History ($($prof.Name))"; Path = $h; Prefix = "$userTag$($b.N)_$($prof.Name -replace ' ','')_" }) }
+                    if (Test-Path -LiteralPath $h) { $targets.Add(@{ Kind = "$($b.N) History ($($prof.Name))"; Path = $h; Prefix = "$userTag$($b.N)_$($prof.Name -replace ' ','')_"; Sqlite = $true }) }
                 }
             }
             foreach ($ff in @(Get-ChildItem -LiteralPath (Join-Path $p.Path 'AppData\Roaming\Mozilla\Firefox\Profiles') -Directory -Force -ErrorAction SilentlyContinue)) {
                 $pl = Join-Path $ff.FullName 'places.sqlite'
-                if (Test-Path -LiteralPath $pl) { $targets.Add(@{ Kind = "Firefox places ($($ff.Name))"; Path = $pl; Prefix = "${userTag}Firefox_" }) }
+                if (Test-Path -LiteralPath $pl) { $targets.Add(@{ Kind = "Firefox places ($($ff.Name))"; Path = $pl; Prefix = "${userTag}Firefox_$($ff.Name)_"; Sqlite = $true }) }
             }
             foreach ($cd in @(Get-ChildItem -LiteralPath (Join-Path $p.Path 'AppData\Local\ConnectedDevicesPlatform') -Directory -Force -ErrorAction SilentlyContinue)) {
                 $ac = Join-Path $cd.FullName 'ActivitiesCache.db'
-                if (Test-Path -LiteralPath $ac) { $targets.Add(@{ Kind = 'Windows Timeline (ActivitiesCache.db)'; Path = $ac; Prefix = "${userTag}Timeline_" }) }
+                if (Test-Path -LiteralPath $ac) { $targets.Add(@{ Kind = 'Windows Timeline (ActivitiesCache.db)'; Path = $ac; Prefix = "${userTag}Timeline_$($cd.Name)_"; Sqlite = $true }) }
             }
             $ph = Join-Path $p.Path 'AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt'
             if (Test-Path -LiteralPath $ph) { $targets.Add(@{ Kind = 'PowerShell history'; Path = $ph; Prefix = "${userTag}PS_" }) }
@@ -1547,6 +1675,16 @@ if (-not $SkipEvidenceCopy) {
             foreach ($t in $targets) {
                 $copy = Copy-Evidence $t.Path '06_evidence_copies\user_artifacts' -Prefix $t.Prefix
                 if (-not $copy) { continue }
+                # SQLite: найсвіжіші записи часто ще у -wal / -journal, а не в основному файлі — копіюємо поруч з тим самим префіксом
+                $hintFiles = @($copy)
+                if ($t.Sqlite) {
+                    foreach ($sfx in '-wal', '-journal', '-shm') {
+                        $side = $t.Path + $sfx
+                        if (-not (Test-Path -LiteralPath $side -PathType Leaf)) { continue }
+                        $sc = Copy-Evidence $side '06_evidence_copies\user_artifacts' -Prefix $t.Prefix -ActiveFile
+                        if ($sc -and $sfx -ne '-shm') { $hintFiles += $sc }
+                    }
+                }
                 if ($t.Kind -eq 'PowerShell history') {
                     $ln = 0
                     foreach ($line in [IO.File]::ReadAllLines($copy)) {
@@ -1554,14 +1692,17 @@ if (-not $SkipEvidenceCopy) {
                         if ($line -match $psRx -or (Test-KwMatch $line) -or (Test-IocIP $line)) { $psh.Add([pscustomobject]@{ Profile = $p.User; Line = $ln; Command = $line }) }
                     }
                 } else {
-                    foreach ($v in @(Get-StringHints $copy)) { $hints.Add([pscustomobject]@{ Profile = $p.User; Source = $t.Kind; Hint = $v }) }
+                    foreach ($hf in $hintFiles) {
+                        $src = $t.Kind; if ($hf -ne $copy) { $src = "$($t.Kind) [$(Split-Path $hf -Leaf)]" }
+                        foreach ($v in @(Get-StringHints $hf)) { $hints.Add([pscustomobject]@{ Profile = $p.User; Source = $src; Hint = $v }) }
+                    }
                 }
             }
         }
         $D.Hints = Arr $hints; $D.PsHist = Arr $psh
         Save-Csv $D.Hints '05_artifacts\evidence_string_hints.csv'
         Save-Csv $D.PsHist '05_artifacts\powershell_history_hits.csv'
-        Add-Note 'Підказки з браузерних БД/Timeline отримані пошуком рядків у КОПІЯХ (без SQLite) — без точних часових міток. Для таймінгу відкрийте копії у DB Browser for SQLite (таблиці urls, downloads; ActivityOperation/Activity).'
+        Add-Note 'Підказки з браузерних БД/Timeline отримані пошуком рядків у КОПІЯХ (без SQLite) — без точних часових міток. Для таймінгу відкрийте копії у DB Browser for SQLite (таблиці urls, downloads; ActivityOperation/Activity). Файли -wal/-journal скопійовано поруч з тим самим префіксом — тримайте їх у одній папці з БД, інакше SQLite не побачить найсвіжіших записів. Копії БД і WAL знято не атомарно.'
     }
 } else { Add-Note 'Копіювання браузерних БД/логів пропущено (-SkipEvidenceCopy).' }
 
@@ -1656,7 +1797,7 @@ Invoke-Step "6.2 Кореляція джерела: 4625 ↔ firewall-лог ↔
         }
         foreach ($src in $agg.Keys) {
             $ev = (@($agg[$src].GetEnumerator() | Sort-Object Name | ForEach-Object { "{0} ×{1}" -f $_.Name, $_.Value }) -join '; ')
-            $corr.Add([pscustomobject]@{ TargetUser = $g.TargetUser; Attempts = $g.Attempts; WindowUtc = ("{0} … {1}" -f $g.FirstUtc, $g.LastUtc); Candidate = $src; IocIP = ($IocIPs -contains $src)
+            $corr.Add([pscustomobject]@{ TargetUser = $g.TargetUser; Attempts = $g.Attempts; WindowUtc = ("{0} … {1}" -f $g.FirstUtc, $g.LastUtc); Candidate = $src; IocIP = (Test-IocIPEq $src)
                 Evidence = $ev; Caveat = 'Кандидат, не доказ ідентичності: підтвердити DHCP/CMDB/ARP/EDR (NIST SP 800-86, 6.4.4)' })
         }
     }
@@ -1672,10 +1813,10 @@ Invoke-Step "6.3 IOC-матчі по всіх джерелах" {
     foreach ($r in @($D.Exec | Where-Object { $_.SHA256 -and $IocSha256 -contains $_.SHA256 })) { $h.Add([pscustomobject]@{ Type = 'SHA256'; Where = 'Запуск (Sysmon)'; Value = $r.SHA256; Details = "$($r.TimeLocal) $($r.Image)" }) }
     foreach ($r in @($D.Tcp | Where-Object { $_.IocIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = "TCP-з'єднання"; Value = $r.RemoteAddress; Details = "$($r.State) $($r.Process)" }) }
     foreach ($r in @($D.Arp | Where-Object { $_.IocIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = 'ARP/NDP-сусід'; Value = $r.IPAddress; Details = "MAC $($r.MAC) ($($r.State))" }) }
-    foreach ($r in @($D.FwBySource | Where-Object { $IocIPs -contains $_.SourceIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = 'pfirewall.log'; Value = $r.SourceIP; Details = ("{0} записів (ALLOW {1} / DROP {2}, ICMP {3}), порти {4}, {5} → {6}" -f $r.Total, $r.Allow, $r.Drop, $r.ICMP, $r.DstPorts, $r.FirstLocal, $r.LastLocal) }) }
+    foreach ($r in @($D.FwBySource | Where-Object { Test-IocIPEq $_.SourceIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = 'pfirewall.log'; Value = $r.SourceIP; Details = ("{0} записів (ALLOW {1} / DROP {2}, ICMP {3}), порти {4}, {5} → {6}" -f $r.Total, $r.Allow, $r.Drop, $r.ICMP, $r.DstPorts, $r.FirstLocal, $r.LastLocal) }) }
     foreach ($r in @($D.RdpSummary | Where-Object { $_.IocIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = 'RDP-журнали'; Value = $r.SourceIP; Details = ("{0} → {1}" -f $r.FirstLocal, $r.LastLocal) }) }
     foreach ($r in @($D.KmsReg | Where-Object { $_.IocIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = 'Реєстр KMS'; Value = $r.Value; Details = "$($r.Key)\$($r.Name)" }) }
-    foreach ($r in @($D.Ev4625 | Where-Object { $IocIPs -contains $_.SourceIP } | Select-Object -First 1)) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = '4625 IpAddress'; Value = $r.SourceIP; Details = 'є невдалі входи з цієї адреси' }) }
+    foreach ($r in @($D.Ev4625 | Where-Object { Test-IocIPEq $_.SourceIP } | Select-Object -First 1)) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = '4625 IpAddress'; Value = $r.SourceIP; Details = 'є невдалі входи з цієї адреси' }) }
     $D.IocHits = Arr $h
     Save-Csv $D.IocHits 'ioc_hits.csv'
 }
@@ -1697,7 +1838,7 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     }
     foreach ($r in @($D.Services | Where-Object { $_.Flags -match 'Розташування|IOC|Підпис' })) { Add-Flag 'Середньо' 'Служби' ("Підозріла поточна служба: {0}" -f $r.Name) ("{0} — {1}" -f $r.Binary, $r.Flags) 'services' }
     foreach ($t in @($D.Tasks)) {
-        $sev = 'Інфо'; if ($t.Flags -match 'IOC|Дія:|Прихована') { $sev = 'Високо' }
+        $sev = 'Інфо'; if ($t.Flags -match 'IOC|Дія:|Прихована|Маскування') { $sev = 'Високо' }
         if ($sev -ne 'Інфо' -or $t.Flags -match 'Стороння') { Add-Flag $sev 'Задачі' ("Задача '{0}{1}' (автор: {2})" -f $t.TaskPath, $t.TaskName, $t.Author) ("{0}; дії: {1}; ост. запуск: {2}; {3}" -f $t.State, $t.Actions, $t.LastRunUtc, $t.Flags) 'tasks' }
     }
     foreach ($r in @($D.TaskEvents | Where-Object { $_.EventId -eq 4698 })) { $sev = 'Середньо'; if ($r.Match) { $sev = 'Високо' }; Add-Flag $sev 'Задачі' ("Створено задачу {0}" -f $r.TaskName) ("{0}; {1}; {2}" -f $r.TimeLocal, $r.Actor, $r.Command) 'tasks' }
@@ -1733,7 +1874,8 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     if ($badAud.Count) { Add-Flag 'Середньо' 'Аудит' ("Налаштування аудиту нижче рекомендованих: {0}" -f $badAud.Count) ((@($badAud | ForEach-Object { $_.Setting }) -join '; ')) 'system' }
     if ($D.PrefetchState -like '0*') { Add-Flag 'Інфо' 'Методологія' 'Prefetch вимкнено' 'Відсутність .pf — очікувана, не доказ відсутності запуску' 'integrity' }
     if ($D.LastAccess -like 'УВІМКНЕНО*') { Add-Flag 'Інфо' 'Методологія' 'NTFS last-access увімкнено' 'Accessed може змінитися при читанні — див. розділ цілісності' 'integrity' }
-    foreach ($n in @($Notes | Where-Object { $_ -like 'УВАГА*' })) { Add-Flag 'Інфо' 'Повнота даних' 'Дані урізано лімітом' $n 'integrity' }
+    # Урізана вибірка = частина вікна не проаналізована: початок атаки міг випасти — це не «Інфо»
+    foreach ($n in @($Notes | Where-Object { $_ -like 'УВАГА*' })) { Add-Flag 'Середньо' 'Повнота даних' 'Вибірку журналу урізано лімітом -MaxEvents' $n 'integrity' }
 }
 
 # ════════════════════════════════════ 7. TIMELINE (UTC, NIST 5.3) ════════════════════════════════════
