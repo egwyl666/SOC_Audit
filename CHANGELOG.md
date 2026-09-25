@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.2] — 2026-09-25
+
+### Fixed
+- Step 5.6 (Zone.Identifier) failed with "The parameter is incorrect" when `Get-Item -Stream` hit a file it cannot
+  query (non-NTFS volume, unusual path): that error is terminating and ignored `-ErrorAction SilentlyContinue`.
+  Each file is now checked separately; unreadable files are skipped and counted in the collection notes.
+
 ## [1.7.1] — 2026-09-25
 
 Event visibility by category — the analyst's manual "what can we see" table, built automatically.
