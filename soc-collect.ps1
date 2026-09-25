@@ -283,7 +283,7 @@ function Add-Custody {
     $line = "{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f $o.Seq, $o.TimeUtc, $o.Operator, $o.Action, $o.Target, $o.Result, $o.Details
     try { [IO.File]::AppendAllText($CustodyLive, $line + [Environment]::NewLine, (New-Object Text.UTF8Encoding($true))) } catch {}
 }
-function Add-Note { param([string]$t) $Notes.Add($t) }
+function Add-Note { param([string]$t) if (-not $Notes.Contains($t)) { $Notes.Add($t) } }   # без дублікатів
 function Add-Flag {
     param([string]$Sev, [string]$Area, [string]$Title, [string]$Evidence, [string]$Anchor = 'summary')
     $Flags.Add([pscustomobject]@{ Severity = $Sev; Area = $Area; Finding = $Title; Evidence = $Evidence; Anchor = $Anchor })
@@ -2516,17 +2516,28 @@ Invoke-Step "5.10 Сліди запуску: UserAssist, RunMRU (Win+R), ShimCac
         $out = ((& reg.exe load "HKLM\$mount" $work 2>&1) | Out-String).Trim()
         Add-Custody 'REG_LOAD_WORKCOPY' "HKLM\$mount" $(if ($LASTEXITCODE -eq 0) { 'OK' } else { 'FAIL' }) ("робоча копія Amcache (не оригінал і не верифікована копія): $out")
         if ($LASTEXITCODE -eq 0) {
+            # Читаємо через .NET RegistryKey з явним Close(): ключі, відкриті провайдером PowerShell (Get-ChildItem HKLM:),
+            # тримають дескриптори, і reg unload тоді не спрацьовує (перевірено в CI)
+            $invRoot = $null
             try {
-                foreach ($k in @(Get-ChildItem -LiteralPath "HKLM:\$mount\Root\InventoryApplicationFile" -ErrorAction SilentlyContinue)) {
-                    $p = Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction SilentlyContinue
-                    if (-not $p) { continue }
-                    $sha1 = ([string]$p.FileId) -replace '^0000', ''
-                    $path = [string]$p.LowerCaseLongPath
-                    $am += [pscustomobject]@{ Path = $path; SHA1 = $sha1.ToUpperInvariant(); Name = [string]$p.Name; Publisher = [string]$p.Publisher; Version = [string]$p.Version
-                        LinkDate = [string]$p.LinkDate; Size = [string]$p.Size; Match = (Test-KwMatch $path); IocSha1 = ($sha1 -and ($IocSha1 -contains $sha1.ToUpperInvariant())) }
+                $invRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("$mount\Root\InventoryApplicationFile")
+                if (-not $invRoot) { Add-Note 'Amcache: розділ Root\InventoryApplicationFile відсутній (стара версія Amcache).' }
+                else {
+                    foreach ($sn in $invRoot.GetSubKeyNames()) {
+                        $sk = $null
+                        try {
+                            $sk = $invRoot.OpenSubKey($sn); if (-not $sk) { continue }
+                            $sha1 = (([string]$sk.GetValue('FileId')) -replace '^0000', '').ToUpperInvariant()
+                            $path = [string]$sk.GetValue('LowerCaseLongPath')
+                            $am += [pscustomobject]@{ Path = $path; SHA1 = $sha1; Name = [string]$sk.GetValue('Name'); Publisher = [string]$sk.GetValue('Publisher')
+                                Version = [string]$sk.GetValue('Version'); LinkDate = [string]$sk.GetValue('LinkDate'); Size = [string]$sk.GetValue('Size')
+                                Match = (Test-KwMatch $path); IocSha1 = ($sha1 -and ($IocSha1 -contains $sha1)) }
+                        } catch { } finally { if ($sk) { $sk.Close() } }
+                    }
                 }
-            } finally {
-                $k = $null; $p = $null   # відкриті дескриптори ключів не дадуть відмонтувати куш
+            } catch { Add-Note "Amcache: не вдалося прочитати робочу копію: $($_.Exception.Message)" }
+            finally {
+                if ($invRoot) { $invRoot.Close() }
                 [GC]::Collect(); [GC]::WaitForPendingFinalizers()
                 $u = ((& reg.exe unload "HKLM\$mount" 2>&1) | Out-String).Trim()
                 if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 2; [GC]::Collect(); $u = ((& reg.exe unload "HKLM\$mount" 2>&1) | Out-String).Trim() }

@@ -29,6 +29,12 @@ Status: parser check and unit tests pass; Windows validation in CI; runs on DC01
   Prefetch files, full Defender state.
 - Table sorting treats "33 744" and "15,1" as numbers.
 
+### Fixed (found by CI on v1.6.0)
+- Amcache working copy stayed mounted: keys opened through the PowerShell registry provider kept handles, so
+  `reg unload` failed. Amcache is now read with .NET `RegistryKey` and every key is closed explicitly.
+- Smoke test counted 0 rows for every CSV in Windows PowerShell 5.1 (`PSObject.Properties` has no `.Count` there).
+- Duplicate lines in collection notes.
+
 ## [1.6.0] — 2026-09-25
 
 Execution traces — "was the file run, by whom and when" where Prefetch is off (servers) and 4688/Sysmon are not set up.

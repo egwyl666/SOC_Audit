@@ -31,7 +31,8 @@ if ($steps.Count -lt 30) { $fail += "лише $($steps.Count) кроків" }
 Write-Host '--- Сліди запуску (кількість рядків)'
 foreach ($f in 'userassist.csv', 'runmru.csv', 'shimcache.csv', 'amcache_files.csv') {
     $pth = Join-Path $case.FullName "05_artifacts\$f"
-    $n = 0; if (Test-Path -LiteralPath $pth) { $n = @(Import-Csv -LiteralPath $pth | Where-Object { $_.PSObject.Properties.Count -gt 1 }).Count }
+    # файл-заглушка без даних починається з '#'; @(...).Count — бо в PS 5.1 у PSObject.Properties немає .Count
+    $n = 0; if ((Test-Path -LiteralPath $pth) -and -not ((Get-Content -LiteralPath $pth -TotalCount 1) -like '#*')) { $n = @(Import-Csv -LiteralPath $pth).Count }
     Write-Host ("  {0,-20} {1}" -f $f, $n)
 }
 $mounted = @(Get-ChildItem 'Registry::HKEY_LOCAL_MACHINE' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'SOC_Amcache_*' })
