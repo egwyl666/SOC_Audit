@@ -2,7 +2,7 @@
 
 [English](README.md) | Українська
 
-**SOC Live Response Collector v1.5.0** — один скрипт збору доказів і первинного аналізу Windows-хоста
+**SOC Live Response Collector v1.6.0** — один скрипт збору доказів і первинного аналізу Windows-хоста
 (замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`). Узгоджено з **NIST SP 800-86**.
 
 Скрипт збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти, перевіряє
@@ -97,6 +97,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-NamePatterns` | `*KMS*`, `*activ*`, `*SECOPatcher*` | Маски імен файлів (пошук по дисках, LNK, BAM, Prefetch, кошик, історія браузерів) |
 | `-KnownPaths` | шляхи KMSAuto | Конкретні файли/папки: hash, підпис, MAC до/після, Zone.Identifier |
 | `-IocSha256` | hash KMSAuto++ і архіву | Шукаються у файлах, процесах, службах, Sysmon |
+| `-IocSha1` | — | SHA1 файлів; шукаються в Amcache (він зберігає SHA1, а не SHA256). Потрібен `-CollectHives` |
 | `-IocIPs` | `192.168.77.51`, `fe80::1a2b:…`, `10.9.0.20` | Шукаються в з'єднаннях, ARP/NDP, pfirewall.log, RDP, 4625, реєстрі KMS. Збіг — лише за межами адреси (`10.9.0.20` не збігається з `110.9.0.201`) |
 | `-SearchRoots` | усі локальні та знімні диски | Де шукати файли |
 | `-ExcludeDirs` | WinSxS, DriverStore, servicing… | Фрагменти шляхів, які пропускаються |
@@ -128,7 +129,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | `-SkipWideSearch` | Без пошуку по всіх дисках | Швидкий тріаж (найдовший крок) |
 | `-SkipEvidenceCopy` | Без копій історії браузерів / Timeline / PS history / pfirewall.log | Hunting на багатьох хостах |
 | `-NoEvtx` | Без експорту оригінальних `.evtx` (крок 3.9) | Hunting / мало місця. На DC журнал Security може бути 1+ ГБ |
-| `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache через `esentutl /vss` | Глибока форензика. Увага: створює тіньову копію — змінює систему (фіксується в custody) |
+| `-CollectHives` | `reg save` SYSTEM/SOFTWARE + Amcache через `esentutl /vss`, розбір Amcache (крок 5.10) | Глибока форензика, пошук видалених файлів за SHA1. Увага: створює тіньову копію — змінює систему (фіксується в custody) |
 | `-UsnJournal` | Вибірка з USN-журналу за масками | Потрібно знати, коли файли створювалися/видалялися. Довго |
 | `-NoZip` | Без ZIP-архіву | Коли архів не потрібен |
 
@@ -194,6 +195,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | **3.9 Оригінальні журнали** | Повний експорт `.evtx` (`wevtutil epl`) з SHA256 — для переаналізу Hayabusa / Chainsaw / EvtxECmd |
 | **3.10 AD: ознаки атак** (лише DC) | Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), зміни привілейованих груп, небезпечні зміни userAccountControl, 5136 (Shadow Credentials, RBCD, GPO, ACL AdminSDHolder і кореня домену). Спершу — перевірка, чи ці події взагалі аудитуються |
 | **4. pfirewall.log** | Зведення по портах і джерелах, ALLOW/DROP, first/last, евристики (ICMP-розвідка, RDP/WinRM/SSH, SMB/RPC, сканування), IOC IP |
+| **5.10 Сліди запуску** | UserAssist (що і скільки разів запускав користувач, коли востаннє), RunMRU (команди Win+R), ShimCache (файли, які система «бачила»), Amcache (шлях + SHA1, з `-CollectHives`). Звірка з масками та `-IocSha1` |
 | **5. Файлові артефакти** | Відомі шляхи, пошук за масками, LNK (з ціллю), BAM/DAM, Prefetch, кошик ($I), Zone.Identifier, копії історії браузерів / Windows Timeline (разом з `-wal`/`-journal`) / PS history з пошуком підказок |
 | **6. Аналіз** | Зведення brute-force, кореляція 4625 ↔ firewall ↔ RDP, IOC-збіги, автоматичні прапорці |
 | **7–9. Звіт** | Timeline (UTC), HTML, chain of custody, маніфест SHA256, ZIP + hash |
@@ -219,7 +221,8 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── 02_system\                   ← система; security_config_audit.csv; на DC — ad_config.csv, ad_risky_accounts.csv
 ├── 03_eventlogs\                ← вибірки журналів; на DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← оригінальні журнали .evtx + evtx_export.csv
-├── 04_firewall\  05_artifacts\
+├── 04_firewall\
+├── 05_artifacts\                ← файлові артефакти; сліди запуску: userassist.csv, runmru.csv, shimcache.csv, amcache_files.csv
 └── 06_evidence_copies\          ← верифіковані копії (браузери, pfirewall.log, кущі)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
 ```
@@ -228,7 +231,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 
 ### HTML-звіт
 
-- Бокове меню — 19 розділів, зокрема «4.1 Налаштування безпеки» і «5.1 Active Directory» (на DC)
+- Бокове меню — 20 розділів (зокрема «13.1 Сліди запуску»), зокрема «4.1 Налаштування безпеки» і «5.1 Active Directory» (на DC)
 - Картки-лічильники та таблиця прапорців з рівнем (Критично / Високо / Середньо / Інфо)
 - У кожній таблиці: **фільтр** (поле пошуку) і **сортування** (клік по заголовку)
 - Підсвітка рядків: червоний — IOC / критично, помаранчевий — підозріло, зелений — VERIFIED / OK
@@ -281,6 +284,9 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 - `.evtx` експортуються повністю (`wevtutil epl`) — це експорт, а не побайтна копія файлу журналу.
 - Історія браузерів / Timeline аналізується пошуком рядків (без SQLite) — без точних часових міток; для таймінгу відкрийте копії в DB Browser for SQLite.
 - Склад привілейованих груп AD — лише прямі члени; вкладені групи перевіряйте окремо.
+- UserAssist / RunMRU — лише для користувачів, які зараз увійшли (завантажений куш NTUSER.DAT).
+- ShimCache на Windows 10+ **не доводить запуск** — лише те, що система «бачила» файл; дата — зміна файлу, не запуску. Записується при вимкненні ОС.
+- Amcache розбирається лише з `-CollectHives`; для цього робоча копія тимчасово монтується в реєстр (`reg load` / `reg unload`, фіксується в custody).
 - Ознаки атак на AD видно лише тоді, коли відповідні підкатегорії аудиту ввімкнені (скрипт це перевіряє і пише у звіт).
 - Рекомендовані розміри журналів — орієнтовні (для навантажених серверів / DC Security ≥ 4 ГБ).
 - IP-адреса у кореляції — **кандидат**, не доказ ідентичності (NIST 6.4.4).

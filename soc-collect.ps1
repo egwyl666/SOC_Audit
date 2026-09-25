@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.5.0 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.6.0 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -70,6 +70,7 @@ param(
         "397E90D1E6E5CA717186A12011220AD18092F10DB85101CB994DC0567D9F568E"
     ),
     [string[]]$IocIPs = @("192.168.77.51", "fe80::1a2b:3c4d:5e6f:7a8b", "10.9.0.20"),
+    [string[]]$IocSha1 = @(),      # SHA1 (Amcache зберігає SHA1, а не SHA256)
 
     # ─── Де шукати файли (порожньо = всі локальні диски) ────────────────────
     [string[]]$SearchRoots = @(),
@@ -153,7 +154,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.5.0'
+$ToolVersion = '1.6.0'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -184,7 +185,7 @@ $CustodyLive = Join-Path $CaseDir 'chain_of_custody.log'
 # При запуску через -File списки "a,b,c" приходять одним рядком — розбиваємо
 function Split-ListParam { param([string[]]$v) if ($v -and $v.Count -eq 1 -and $v[0] -match ',') { return @($v[0] -split '\s*,\s*' | Where-Object { $_ }) }; return @($v) }
 $NamePatterns = Split-ListParam $NamePatterns; $KnownPaths = Split-ListParam $KnownPaths; $IocSha256 = Split-ListParam $IocSha256
-$IocIPs = Split-ListParam $IocIPs; $SearchRoots = Split-ListParam $SearchRoots; $ExcludeDirs = Split-ListParam $ExcludeDirs
+$IocIPs = Split-ListParam $IocIPs; $IocSha1 = @(Split-ListParam $IocSha1 | ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { $_ }); $SearchRoots = Split-ListParam $SearchRoots; $ExcludeDirs = Split-ListParam $ExcludeDirs
 # Папку з доказами виключаємо з пошуку ПІСЛЯ розбиття списку. Якщо OutRoot — корінь диска (E:\),
 # виключаємо лише папку поточної справи, інакше '\' виключив би взагалі все.
 $OutRel = ($OutRoot -replace '^[A-Za-z]:', '').TrimEnd('\')
@@ -218,7 +219,7 @@ $DataKeys = 'TcpRaw','UdpRaw','ProcRaw','Procs','Tcp','Udp','Arp','Dns','IpAddr'
             'LocalUsers','LocalAdmins','Services','Tasks','Autoruns','WmiPersist','MpExclusions','MpStatusRows','Licensing','KmsReg',
             'FwProfiles','FwRules','Ev4625','Ev4624','OtherAuth','LogCleared','Rdp','RdpSummary','SvcEvents','TaskEvents',
             'FwEvents','MpEvents','Exec','SysmonMisc','Ps4104','FwByPort','FwBySource','FwIocRaw','FwSvcHits','KnownFiles',
-            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
+            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','UserAssist','RunMru','ShimCache','Amcache','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
 foreach ($k in $DataKeys) { $D[$k] = @() }
 
 $Lolbins = @('netsh.exe','wmic.exe','reg.exe','sc.exe','schtasks.exe','cscript.exe','wscript.exe','mshta.exe','rundll32.exe',
@@ -725,6 +726,73 @@ function ConvertFrom-AuditpolCsv {   # рядки 'auditpol /get /subcategory:{G
     if ($v) { $res.Value = $v }   # нічого не розпізнали -> $null («невідомо»), а не 0 («немає аудиту»)
     return $res
 }
+# ─── Сліди запуску (v1.6): чисті функції розбору бінарних форматів — тестуються окремо (tests/run-tests.ps1) ───
+function ConvertFrom-Rot13 {   # імена значень UserAssist закодовано ROT13
+    param([string]$s)
+    if (-not $s) { return $s }
+    $c = $s.ToCharArray()
+    for ($i = 0; $i -lt $c.Length; $i++) {
+        $ch = [int]$c[$i]
+        if ($ch -ge 65 -and $ch -le 90) { $c[$i] = [char](65 + (($ch - 65 + 13) % 26)) }
+        elseif ($ch -ge 97 -and $ch -le 122) { $c[$i] = [char](97 + (($ch - 97 + 13) % 26)) }
+    }
+    return -join $c
+}
+$KnownFolderGuids = @{   # KNOWNFOLDERID, якими UserAssist підміняє початок шляху
+    '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}' = '%SystemRoot%\System32'; '{D65231B0-B2F1-4857-A4CE-A8E7C6EA7D27}' = '%SystemRoot%\SysWOW64'
+    '{F38BF404-1D43-42F2-9305-67DE0B28FC23}' = '%SystemRoot%'; '{6D809377-6AF0-444B-8957-A3773F02200E}' = '%ProgramFiles%'
+    '{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}' = '%ProgramFiles(x86)%'; '{F7F1ED05-9F6D-47A2-AAAE-29D317C6F066}' = '%CommonProgramFiles%'
+    '{0139D44E-6AFE-49F2-8690-3DAFCAE6FFB8}' = '%ProgramData%\Microsoft\Windows\Start Menu\Programs'
+    '{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}' = '%AppData%\Microsoft\Windows\Start Menu\Programs'
+    '{9E3995AB-1F9C-4F13-B827-48B24B6C7174}' = '%AppData%\Microsoft\Internet Explorer\Quick Launch\User Pinned'
+    '{374DE290-123F-4565-9164-39C4925E467B}' = '%UserProfile%\Downloads'; '{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}' = '%UserProfile%\Desktop'
+    '{FDD39AD0-238F-46AF-ADB4-6C85480369C7}' = '%UserProfile%\Documents'; '{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}' = '%LocalAppData%'
+    '{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}' = '%AppData%'; '{A520A1A4-1780-4FF6-BD18-167343C5AF16}' = '%UserProfile%\AppData\LocalLow'
+    '{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}' = '%ProgramData%'; '{5E6C858F-0E22-4760-9AFE-EA3317B67173}' = '%UserProfile%'
+}
+function Resolve-KnownFolderPath {
+    param([string]$p)
+    if ($p -match '^(\{[0-9A-Fa-f-]{36}\})(.*)$' -and $KnownFolderGuids.ContainsKey($Matches[1].ToUpperInvariant())) { return $KnownFolderGuids[$Matches[1].ToUpperInvariant()] + $Matches[2] }
+    return $p
+}
+function ConvertFrom-UserAssistData {   # значення Count\<ROT13>: Win7+ — 72 байти, XP/2003 — 16 байт
+    param([byte[]]$b)
+    $r = [pscustomobject]@{ RunCount = $null; FocusCount = $null; FocusSeconds = $null; LastRunUtc = $null }
+    if (-not $b) { return $r }
+    $ft = [int64]0
+    if ($b.Length -ge 72) {
+        $r.RunCount = [BitConverter]::ToInt32($b, 4); $r.FocusCount = [BitConverter]::ToInt32($b, 8)
+        $r.FocusSeconds = [math]::Round([BitConverter]::ToUInt32($b, 12) / 1000); $ft = [BitConverter]::ToInt64($b, 60)
+    } elseif ($b.Length -ge 16) {
+        $r.RunCount = [math]::Max(0, [BitConverter]::ToInt32($b, 4) - 5); $ft = [BitConverter]::ToInt64($b, 8)
+    }
+    if ($ft -gt 0) { try { $r.LastRunUtc = [DateTime]::FromFileTimeUtc($ft) } catch {} }
+    return $r
+}
+function ConvertFrom-ShimCache {   # AppCompatCache, формат Windows 10/11 і Server 2016+ (заголовок 0x30/0x34, записи '10ts')
+    param([byte[]]$b)
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not $b -or $b.Length -lt 0x40) { return $out.ToArray() }
+    $off = [BitConverter]::ToInt32($b, 0)
+    if ($off -notin 0x30, 0x34) { return $out.ToArray() }   # інші версії ОС — не підтримуються (звіт скаже «формат не розпізано»)
+    $order = 0
+    while ($off + 14 -le $b.Length) {
+        if (-not ($b[$off] -eq 0x31 -and $b[$off + 1] -eq 0x30 -and $b[$off + 2] -eq 0x74 -and $b[$off + 3] -eq 0x73)) { break }   # '10ts'
+        $entryLen = [BitConverter]::ToInt32($b, $off + 8)
+        $p = $off + 12
+        if ($entryLen -lt 14 -or $p + $entryLen -gt $b.Length) { break }
+        $pathLen = [BitConverter]::ToUInt16($b, $p); $p += 2
+        if ($p + $pathLen + 12 -gt $b.Length) { break }
+        $path = [Text.Encoding]::Unicode.GetString($b, $p, $pathLen); $p += $pathLen
+        $ft = [BitConverter]::ToInt64($b, $p)
+        $mod = $null; if ($ft -gt 0) { try { $mod = [DateTime]::FromFileTimeUtc($ft) } catch {} }
+        $out.Add([pscustomobject]@{ Order = $order; Path = $path; LastModifiedUtc = $mod })
+        $order++
+        $off = $off + 12 + $entryLen
+    }
+    return $out.ToArray()
+}
+
 function Get-AuditSubcategory { param([string]$Guid) try { return (ConvertFrom-AuditpolCsv @(& auditpol /get /subcategory:"$Guid" /r 2>$null)) } catch { return [pscustomobject]@{ Value = $null; Text = '' } } }
 
 function Get-Sha256FromHashes { param([string]$h) if ($h -match '(?i)SHA256=([0-9a-f]{64})') { return $Matches[1].ToUpper() }; return '' }
@@ -755,7 +823,7 @@ Write-Host ("Вікно подій: {0} → {1} (локальний час)" -f 
 Write-Host ("Результати: {0}" -f $CaseDir)
 # Тестові IOC за замовчуванням (кейс KMSAuto): якщо жоден IOC-параметр не передано, збіги з масками — шум, а не знахідки
 $ScriptBound = $PSBoundParameters   # копія посилання: усередині Where-Object {} $PSBoundParameters може належати іншій області
-$UsingDefaultIoc = -not (@('NamePatterns', 'IocSha256', 'IocIPs', 'KnownPaths') | Where-Object { $ScriptBound.ContainsKey($_) })
+$UsingDefaultIoc = -not (@('NamePatterns', 'IocSha256', 'IocSha1', 'IocIPs', 'KnownPaths') | Where-Object { $ScriptBound.ContainsKey($_) })
 if ($UsingDefaultIoc) {
     Write-Host "УВАГА: IOC не задано — використано тестові IOC за замовчуванням (KMSAuto). Збіги з масками знижено до «Інфо». Для справи передайте -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths." -ForegroundColor Yellow
     Add-Note 'Використано тестові IOC за замовчуванням (кейс KMSAuto): жоден з -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths не передано. Прапорці, що спираються лише на збіг з маскою, знижено до «Інфо».'
@@ -2335,6 +2403,97 @@ if ($UsnJournal) {
     }
 }
 
+# ════════════════════════════════════ 5.10 СЛІДИ ЗАПУСКУ ════════════════════════════════════
+# «Чи запускали файл, хто і коли» — там, де Prefetch вимкнено (сервери), а 4688/Sysmon не налаштовано.
+# UserAssist і RunMRU — лише профілі із завантаженим кущем (користувач увійшов); ShimCache — для всієї системи;
+# Amcache — лише з -CollectHives: розбирається робоча копія копії, оригінал і верифікована копія не змінюються.
+Invoke-Step "5.10 Сліди запуску: UserAssist, RunMRU (Win+R), ShimCache, Amcache" {
+    $ua = New-Object System.Collections.Generic.List[object]
+    $mru = New-Object System.Collections.Generic.List[object]
+    $loaded = @(Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^S-1-5-21-[\d-]+$' })
+    foreach ($h in $loaded) {
+        $sid = $h.PSChildName; $user = Resolve-Sid $sid
+        $base = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer"
+        foreach ($g in @(Get-ChildItem -LiteralPath "$base\UserAssist" -ErrorAction SilentlyContinue)) {
+            $cnt = Get-Item -LiteralPath (Join-Path $g.PSPath 'Count') -ErrorAction SilentlyContinue
+            if (-not $cnt) { continue }
+            $kind = switch ($g.PSChildName.ToUpperInvariant()) { '{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}' { 'Програми' } '{F4E57C4B-2036-45F0-A9AB-443BCFE33D9F}' { 'Ярлики' } default { $g.PSChildName } }
+            foreach ($vn in $cnt.GetValueNames()) {
+                $name = ConvertFrom-Rot13 $vn
+                if ($name -match '^(UEME_CTLSESSION|UEME_CTLCUACount)') { continue }
+                $data = $cnt.GetValue($vn); if (-not ($data -is [byte[]])) { continue }
+                $u = ConvertFrom-UserAssistData $data
+                $path = Resolve-KnownFolderPath $name
+                $ua.Add([pscustomobject]@{ Profile = $user; Kind = $kind; Program = $path; RunCount = $u.RunCount; FocusCount = $u.FocusCount; FocusSeconds = $u.FocusSeconds
+                    LastRunUtc = (U $u.LastRunUtc); Match = (Test-KwMatch $path) })
+            }
+        }
+        $rk = Get-ItemProperty -LiteralPath "$base\RunMRU" -ErrorAction SilentlyContinue
+        if ($rk) {
+            $order = [string]$rk.MRUList; $i = 0
+            foreach ($ch in $order.ToCharArray()) {
+                $cmd = [string]$rk."$ch"; if (-not $cmd) { continue }
+                $cmd = $cmd -replace '\\1$', ''
+                $exe = Get-ExeFromCmd $cmd
+                $why = Get-ExecReason $exe $cmd ''
+                $mru.Add([pscustomobject]@{ Profile = $user; Order = $i; Command = $cmd; Reason = $why; Match = ((Test-KwMatch $cmd) -or (Test-IocIP $cmd)) })
+                $i++
+            }
+        }
+    }
+    $allProfiles = @($D.Profiles | Where-Object { $_.Exists }).Count
+    if ($allProfiles -gt $loaded.Count) { Add-Note ("UserAssist / RunMRU: прочитано {0} з {1} профілів — лише тих, чий куш NTUSER.DAT завантажено (користувач зараз увійшов)." -f $loaded.Count, $allProfiles) }
+    $D.UserAssist = Arr ($ua | Sort-Object @{ Expression = { -not $_.Match } }, @{ Expression = { $_.LastRunUtc }; Descending = $true })
+    $D.RunMru = Arr $mru
+    Save-Csv $D.UserAssist '05_artifacts\userassist.csv'
+    Save-Csv $D.RunMru '05_artifacts\runmru.csv'
+
+    # ShimCache (AppCompatCache): Windows пише його в реєстр при вимкненні — записи після останнього завантаження можуть бути відсутні
+    $sc = @()
+    $raw = $null; try { $raw = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache' -Name AppCompatCache -ErrorAction Stop).AppCompatCache } catch {}
+    if ($raw) {
+        $sc = @(ConvertFrom-ShimCache ([byte[]]$raw))
+        if (-not $sc.Count) { Add-Note ("ShimCache: формат не розпізано (заголовок 0x{0:X}) — підтримуються Windows 10/11 і Server 2016+." -f [BitConverter]::ToInt32([byte[]]$raw, 0)) }
+        Add-Custody 'READ_REGISTRY' 'AppCompatCache' 'OK' ("{0} байт, {1} записів" -f $raw.Length, $sc.Count)
+    } else { Add-Note 'ShimCache: значення AppCompatCache недоступне.' }
+    $D.ShimCache = Arr ($sc | ForEach-Object { [pscustomobject]@{ Order = $_.Order; Path = $_.Path; LastModifiedUtc = (U $_.LastModifiedUtc); PathClass = (Get-PathClass $_.Path); Match = (Test-KwMatch $_.Path) } })
+    Save-Csv $D.ShimCache '05_artifacts\shimcache.csv'
+
+    # Amcache: лише якщо -CollectHives уже зробив верифіковану копію. Робоча копія -> reg load -> читання -> reg unload -> видалення.
+    $am = @()
+    $amCopy = Join-Path $CaseDir '06_evidence_copies\hives\Amcache.hve'
+    if ($CollectHives -and (Test-Path -LiteralPath $amCopy)) {
+        $work = Join-Path ([IO.Path]::GetTempPath()) ("soc_amcache_{0}.hve" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+        $mount = 'SOC_Amcache_' + ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        Copy-Item -LiteralPath $amCopy -Destination $work -Force
+        $out = ((& reg.exe load "HKLM\$mount" $work 2>&1) | Out-String).Trim()
+        Add-Custody 'REG_LOAD_WORKCOPY' "HKLM\$mount" $(if ($LASTEXITCODE -eq 0) { 'OK' } else { 'FAIL' }) ("робоча копія Amcache (не оригінал і не верифікована копія): $out")
+        if ($LASTEXITCODE -eq 0) {
+            try {
+                foreach ($k in @(Get-ChildItem -LiteralPath "HKLM:\$mount\Root\InventoryApplicationFile" -ErrorAction SilentlyContinue)) {
+                    $p = Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction SilentlyContinue
+                    if (-not $p) { continue }
+                    $sha1 = ([string]$p.FileId) -replace '^0000', ''
+                    $path = [string]$p.LowerCaseLongPath
+                    $am += [pscustomobject]@{ Path = $path; SHA1 = $sha1.ToUpperInvariant(); Name = [string]$p.Name; Publisher = [string]$p.Publisher; Version = [string]$p.Version
+                        LinkDate = [string]$p.LinkDate; Size = [string]$p.Size; Match = (Test-KwMatch $path); IocSha1 = ($sha1 -and ($IocSha1 -contains $sha1.ToUpperInvariant())) }
+                }
+            } finally {
+                $k = $null; $p = $null   # відкриті дескриптори ключів не дадуть відмонтувати куш
+                [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+                $u = ((& reg.exe unload "HKLM\$mount" 2>&1) | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 2; [GC]::Collect(); $u = ((& reg.exe unload "HKLM\$mount" 2>&1) | Out-String).Trim() }
+                Add-Custody 'REG_UNLOAD_WORKCOPY' "HKLM\$mount" $(if ($LASTEXITCODE -eq 0) { 'OK' } else { 'FAIL' }) $u
+                if ($LASTEXITCODE -ne 0) { Add-Note "Amcache: не вдалося відмонтувати HKLM\$mount — виконайте вручну: reg unload HKLM\$mount" }
+            }
+        } else { Add-Note "Amcache: reg load робочої копії не вдався ($out)." }
+        Remove-Item -LiteralPath $work -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath (Split-Path $work) -Filter ((Split-Path $work -Leaf) + '*') -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    } else { Add-Note 'Amcache не розбирався: потрібен -CollectHives (копія Amcache.hve через esentutl /vss).' }
+    $D.Amcache = Arr ($am | Sort-Object @{ Expression = { -not ($_.Match -or $_.IocSha1) } }, Path)
+    Save-Csv $D.Amcache '05_artifacts\amcache_files.csv'
+}
+
 # ════════════════════════════════════ 6. АНАЛІЗ ════════════════════════════════════
 Invoke-Step "6.1 Brute-force: зведення 4625 (ціль, джерело, кількість, перша/остання спроба)" {
     $bf = @($D.Ev4625) | Group-Object -Property TargetUser, SourceIP, Workstation, LogonType, CallerProcess | ForEach-Object {
@@ -2401,13 +2560,14 @@ Invoke-Step "6.3 IOC-матчі по всіх джерелах" {
     foreach ($r in @($D.RdpSummary | Where-Object { $_.IocIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = 'RDP-журнали'; Value = $r.SourceIP; Details = ("{0} → {1}" -f $r.FirstLocal, $r.LastLocal) }) }
     foreach ($r in @($D.KmsReg | Where-Object { $_.IocIP })) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = 'Реєстр KMS'; Value = $r.Value; Details = "$($r.Key)\$($r.Name)" }) }
     foreach ($r in @($D.Ev4625 | Where-Object { Test-IocIPEq $_.SourceIP } | Select-Object -First 1)) { $h.Add([pscustomobject]@{ Type = 'IP'; Where = '4625 IpAddress'; Value = $r.SourceIP; Details = 'є невдалі входи з цієї адреси' }) }
+    foreach ($r in @($D.Amcache | Where-Object { $_.IocSha1 })) { $h.Add([pscustomobject]@{ Type = 'SHA1'; Where = 'Amcache (файл був на диску / запускався)'; Value = $r.SHA1; Details = $r.Path }) }
     $D.IocHits = Arr $h
     Save-Csv $D.IocHits 'ioc_hits.csv'
 }
 
 Invoke-Step "6.4 Автоматичні прапорці (підказки для аналітика, не висновки)" {
     foreach ($r in @($D.LogCleared)) { Add-Flag 'Критично' 'Журнали' 'Очищення / зупинка журналу подій' ("{0} ({1}) {2}" -f $r.TimeLocal, $r.EventId, $r.Details) 'auth' }
-    foreach ($r in @($D.IocHits | Where-Object { $_.Type -eq 'SHA256' })) { Add-Flag 'Критично' 'IOC' ("Збіг IOC-hash: {0}" -f $r.Where) ("{0} — {1}" -f $r.Value, $r.Details) 'ioc' }
+    foreach ($r in @($D.IocHits | Where-Object { $_.Type -in 'SHA256', 'SHA1' })) { Add-Flag 'Критично' 'IOC' ("Збіг IOC-hash: {0}" -f $r.Where) ("{0} — {1}" -f $r.Value, $r.Details) 'ioc' }
     foreach ($r in @($D.IocHits | Where-Object { $_.Type -eq 'IP' })) { Add-Flag 'Високо' 'IOC' ("IOC IP {0} — {1}" -f $r.Value, $r.Where) $r.Details 'ioc' }
     foreach ($g in @($D.BruteForce | Where-Object { $_.Attempts -ge 10 })) {
         Add-Flag 'Високо' 'Автентифікація' ("Серія невдалих входів на '{0}' ×{1}" -f $g.TargetUser, $g.Attempts) ("{0} → {1} (лок.); IP={2}; WS={3}; {4}; {5}" -f $g.FirstLocal, $g.LastLocal, $g.SourceIP, $g.Workstation, $g.LogonType, $g.Statuses) 'auth'
@@ -2466,6 +2626,10 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     }
     $adGap = @($D.AdAudit | Where-Object { $_.OK -eq $false })
     if ($adGap.Count) { Add-Flag 'Середньо' 'Active Directory' ("Аудит AD неповний: {0} підкатегор." -f $adGap.Count) ((@($adGap | ForEach-Object { "{0} ({1})" -f $_.Subcategory, $_.Detects }) -join '; ') + ' — відсутність подій не доводить відсутність атаки') 'ad' }
+    foreach ($r in @($D.UserAssist | Where-Object { $_.Match })) { Add-Flag 'Середньо' 'Виконання' ("UserAssist: {0}" -f $r.Program) ("{0}; запусків {1}; останній {2}" -f $r.Profile, $r.RunCount, $r.LastRunUtc) 'traces' }
+    foreach ($r in @($D.RunMru | Where-Object { $_.Match -or $_.Reason -match 'Підозрілі|IOC' })) { Add-Flag 'Середньо' 'Виконання' ("RunMRU (Win+R): {0}" -f $r.Command) ("{0} — {1}" -f $r.Profile, $(if ($r.Reason) { $r.Reason } else { 'Збіг з маскою IOC' })) 'traces' }
+    foreach ($r in @($D.ShimCache | Where-Object { $_.Match })) { Add-Flag 'Середньо' 'Виконання' ("ShimCache: {0}" -f $r.Path) ("позиція {0}; дата зміни файлу {1} (це не час запуску)" -f $r.Order, $r.LastModifiedUtc) 'traces' }
+    foreach ($r in @($D.Amcache | Where-Object { $_.Match -and -not $_.IocSha1 })) { Add-Flag 'Середньо' 'Виконання' ("Amcache: {0}" -f $r.Path) ("SHA1 {0}; {1} {2}" -f $r.SHA1, $r.Publisher, $r.Version) 'traces' }
     $badAud = @($D.AuditSettings | Where-Object { $_.OK -eq $false })
     if ($badAud.Count) { Add-Flag 'Середньо' 'Аудит' ("Налаштування аудиту нижче рекомендованих: {0}" -f $badAud.Count) ((@($badAud | ForEach-Object { $_.Setting }) -join '; ')) 'system' }
     if ($D.PrefetchState -like '0*') { Add-Flag 'Інфо' 'Методологія' 'Prefetch вимкнено' 'Відсутність .pf — очікувана, не доказ відсутності запуску' 'integrity' }
@@ -2474,7 +2638,7 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     foreach ($n in @($Notes | Where-Object { $_ -like 'УВАГА*' })) { Add-Flag 'Середньо' 'Повнота даних' 'Вибірку журналу урізано лімітом -MaxEvents' $n 'integrity' }
     # Тестові IOC: прапорці, єдина підстава яких — збіг з маскою імені, знижуємо до «Інфо» (IOC-hash / IOC IP не чіпаємо)
     if ($UsingDefaultIoc) {
-        $maskTitles = '^(LNK на IOC|BAM: запуск|Видалено в кошик|Завантажено з інтернету|Згадки IOC в історії)'
+        $maskTitles = '^(LNK на IOC|BAM: запуск|Видалено в кошик|Завантажено з інтернету|Згадки IOC в історії|UserAssist: |ShimCache: |Amcache: )'
         foreach ($f in $Flags) {
             if ($f.Severity -ne 'Середньо') { continue }
             if ([string]$f.Evidence -match ' — Збіг з маскою IOC$' -or [string]$f.Finding -match $maskTitles) {
@@ -2499,6 +2663,8 @@ Invoke-Step "7.1 Єдиний timeline з усіх джерел" {
     foreach ($r in @($D.Exec)) { $m = ''; if ($r.Reason -match 'IOC|Підозрілі') { $m = 'bad' }; Add-TL $r.TimeUtc $r.Source 'Запуск' ("{0}  ← {1}" -f $r.CommandLine, $r.Parent) $r.User $m }
     foreach ($r in @($D.SysmonMisc)) { Add-TL $r.TimeUtc 'Sysmon' $r.EventId ("{0}: {1} ({2})" -f $r.Reason, $r.Target, $r.Image) $r.User 'warn' }
     foreach ($r in @($D.Ps4104)) { Add-TL $r.TimeUtc 'PowerShell' '4104' $r.Snippet '' 'warn' }
+    foreach ($r in @($D.UserAssist | Where-Object { $_.Match })) { Add-TL $r.LastRunUtc 'UserAssist' 'LastRun' ("{0} (запусків: {1})" -f $r.Program, $r.RunCount) $r.Profile 'warn' }
+    foreach ($r in @($D.ShimCache | Where-Object { $_.Match })) { Add-TL $r.LastModifiedUtc 'ShimCache' 'FileModified' ("Дата зміни файлу (не запуску): {0}" -f $r.Path) '' '' }
     foreach ($r in @($D.AdEvents | Where-Object { $_.Severity -ne 'Інфо' })) { Add-TL $r.TimeUtc 'Active Directory' ([string]$r.EventId) ("{0}: {1} {2} {3}" -f $r.Technique, $r.Target, $r.SourceIP, $r.Details) $r.Actor $(if ($r.Severity -in 'Критично', 'Високо') { 'bad' } else { 'warn' }) }
     foreach ($f in @(@($D.KnownFiles) + @($D.WideHigh) | Where-Object { $_.Exists })) {
         Add-TL $f.CreatedUtc 'Файл' 'Created' ("Створено: {0}" -f $f.Path) '' 'warn'
@@ -2705,6 +2871,15 @@ Invoke-Step "8. Формування HTML-звіту" {
     $b = (H3 'Запуски LOLBin / з IOC (Sysmon 1, 4688)') + (HT $D.Exec -Csv '03_eventlogs\process_exec_lolbin_ioc.csv' -RowClass { param($r) if ($r.Reason -match 'IOC|Підозрілі') { 'bad' } }) +
          (H3 'Sysmon 11/13/3 за IOC') + (HT $D.SysmonMisc -Csv '03_eventlogs\sysmon_file_reg_net_ioc.csv') + (H3 'PowerShell 4104') + (HT $D.Ps4104 -Csv '03_eventlogs\powershell_4104_suspicious.csv')
     [void]$S.Append((Sec 'exec' '13. Виконання процесів і скриптів' $b -Count @($D.Exec).Count))
+    $b = (H3 'UserAssist — запуски через Провідник / «Пуск» / ярлики' 'Лише профілі із завантаженим кущем (користувач увійшов). LastRunUtc — час останнього запуску.') +
+         (HT $D.UserAssist -Cols @('Profile', 'Kind', 'Program', 'RunCount', 'LastRunUtc', 'FocusSeconds', 'Match') -RowClass $rcMatch -Csv '05_artifacts\userassist.csv' -Empty 'Записів UserAssist немає.') +
+         (H3 'RunMRU — команди з вікна «Виконати» (Win+R)' 'Order 0 — найсвіжіша команда. Reason — чому команда підозріла.') +
+         (HT $D.RunMru -RowClass { param($r) if ($r.Match) { 'bad' } elseif ($r.Reason) { 'warn' } } -Csv '05_artifacts\runmru.csv' -Empty 'Команд RunMRU немає.') +
+         (H3 'ShimCache (AppCompatCache)' 'Файли, які система «бачила». На Windows 10+ це НЕ доказ запуску; дата — зміна файлу, не запуск. Order 0 — найсвіжіший запис. Оновлюється при вимкненні ОС.') +
+         (HT $D.ShimCache -RowClass $rcMatch -Csv '05_artifacts\shimcache.csv' -Empty 'ShimCache недоступний або формат не розпізано.') +
+         (H3 'Amcache — файли, що були на диску / запускались (шлях, SHA1)' 'Лише з -CollectHives. SHA1 можна шукати у VirusTotal і порівнювати з -IocSha1.') +
+         (HT $D.Amcache -Cols @('Path', 'SHA1', 'Publisher', 'Version', 'LinkDate', 'Match', 'IocSha1') -RowClass { param($r) if ($r.IocSha1 -or $r.Match) { 'bad' } } -Csv '05_artifacts\amcache_files.csv' -Empty 'Amcache не розбирався (потрібен -CollectHives).')
+    [void]$S.Append((Sec 'traces' '13.1 Сліди запуску (UserAssist, RunMRU, ShimCache, Amcache)' $b -Count (@($D.UserAssist | Where-Object { $_.Match }).Count + @($D.RunMru | Where-Object { $_.Reason -or $_.Match }).Count + @($D.ShimCache | Where-Object { $_.Match }).Count + @($D.Amcache | Where-Object { $_.Match -or $_.IocSha1 }).Count)))
 
     $b = (H3 'IOC-збіги') + (HT $D.IocHits -Csv 'ioc_hits.csv' -RowClass { 'bad' } -Empty 'IOC-збігів не знайдено.')
     [void]$S.Append((Sec 'ioc' '14. IOC-збіги' $b -Count @($D.IocHits).Count))
@@ -2763,7 +2938,7 @@ r.sort(function(x,y){var a=x.cells[i].innerText,c=y.cells[i].innerText,na=parseF
 '@
     $navItems = @(@('summary', 'Огляд і прапорці'), @('integrity', 'Цілісність / NIST'), @('volatile', 'Волатильні дані'), @('system', 'Система'), @('hardening', 'Налаштування безпеки'), @('auth', 'Автентифікація'), @('ad', 'Active Directory'),
                   @('rdp', 'RDP'), @('services', 'Служби'), @('tasks', 'Задачі'), @('persist', 'Персистентність'), @('firewall', 'Firewall'), @('defender', 'Defender'),
-                  @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
+                  @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('traces', 'Сліди запуску'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
     $nav = (@($navItems | ForEach-Object { "<a href='#$($_[0])'>$(E $_[1])</a>" }) -join '')
     $iocBanner = ''
     if ($UsingDefaultIoc) { $iocBanner = "<div class='banner'><b>Використано тестові IOC за замовчуванням (кейс KMSAuto).</b> Жоден з -NamePatterns / -IocSha256 / -IocIPs / -KnownPaths не передано — прапорці лише за збігом з маскою знижено до «Інфо» і позначено «[тестова маска]». Для розслідування запустіть з IOC своєї справи.</div>" }

@@ -29,7 +29,7 @@ $fnAsts = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.F
 foreach ($f in $fnAsts) { . ([scriptblock]::Create($f.Extent.Text)) }
 
 # Верхньорівневі присвоєння, потрібні функціям
-$wantVars = 'Lolbins', 'TaskInterpreters', 'AdReplGuids', 'AdUacCodes', 'AdPrivGroupRx', 'NtStatus', 'LogonTypes'
+$wantVars = 'Lolbins', 'TaskInterpreters', 'KnownFolderGuids', 'AdReplGuids', 'AdUacCodes', 'AdPrivGroupRx', 'NtStatus', 'LogonTypes'
 foreach ($a in @($ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] })) {
     $left = $a.Left
     if ($left -is [System.Management.Automation.Language.VariableExpressionAst] -and $wantVars -contains $left.VariablePath.UserPath) { . ([scriptblock]::Create($a.Extent.Text)) }
@@ -125,6 +125,60 @@ try {
     Assert-True 'UA «Без аудиту» = 0'     ((ConvertFrom-AuditpolCsv @('a,b,c,d,e,f', 'x,y,z,w,Без аудиту,')).Value -eq 0)
     Assert-True 'помилка auditpol -> невідомо' ($null -eq (ConvertFrom-AuditpolCsv @('Ошибка 0x00000057 произошла:', 'Параметр задан неверно.')).Value)
     Assert-True 'порожньо -> невідомо'    ($null -eq (ConvertFrom-AuditpolCsv @()).Value)
+
+    Test-Group 'Сліди запуску: ROT13, UserAssist, ShimCache (синтетичні байти)'
+    Assert-True 'ROT13'                   ((ConvertFrom-Rot13 'P:\Jvaqbjf\abgrcnq.rkr') -eq 'C:\Windows\notepad.exe')
+    Assert-True 'ROT13 двічі = оригінал'  ((ConvertFrom-Rot13 (ConvertFrom-Rot13 'Evil_Test.EXE 123')) -eq 'Evil_Test.EXE 123')
+    Assert-True 'KNOWNFOLDER System32'    ((Resolve-KnownFolderPath '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\cmd.exe') -eq '%SystemRoot%\System32\cmd.exe')
+    Assert-True 'KNOWNFOLDER невідомий — без змін' ((Resolve-KnownFolderPath '{00000000-0000-0000-0000-000000000000}\x.exe') -eq '{00000000-0000-0000-0000-000000000000}\x.exe')
+    $when = [DateTime]::new(2026, 9, 20, 10, 30, 0, [DateTimeKind]::Utc)
+    $ua72 = New-Object byte[] 72
+    [BitConverter]::GetBytes([int32]7).CopyTo($ua72, 4); [BitConverter]::GetBytes([int32]3).CopyTo($ua72, 8)
+    [BitConverter]::GetBytes([uint32]65000).CopyTo($ua72, 12); [BitConverter]::GetBytes($when.ToFileTimeUtc()).CopyTo($ua72, 60)
+    $u = ConvertFrom-UserAssistData $ua72
+    Assert-True 'UserAssist 72 байти: запуски' ($u.RunCount -eq 7 -and $u.FocusCount -eq 3 -and $u.FocusSeconds -eq 65)
+    Assert-True 'UserAssist 72 байти: час'     ($u.LastRunUtc -eq $when)
+    $ua16 = New-Object byte[] 16
+    [BitConverter]::GetBytes([int32]9).CopyTo($ua16, 4); [BitConverter]::GetBytes($when.ToFileTimeUtc()).CopyTo($ua16, 8)
+    $u = ConvertFrom-UserAssistData $ua16
+    Assert-True 'UserAssist 16 байт (XP): лічильник −5' ($u.RunCount -eq 4 -and $u.LastRunUtc -eq $when)
+    Assert-True 'UserAssist порожнє значення' ($null -eq (ConvertFrom-UserAssistData @()).LastRunUtc)
+    function New-ShimEntry { param([string]$Path, [datetime]$Mod)
+        $pb = [Text.Encoding]::Unicode.GetBytes($Path); $data = [byte[]](1, 2, 3)
+        $body = New-Object System.Collections.Generic.List[byte]
+        $body.AddRange([BitConverter]::GetBytes([uint16]$pb.Length)); $body.AddRange($pb); $body.AddRange([BitConverter]::GetBytes($Mod.ToFileTimeUtc()))
+        $body.AddRange([BitConverter]::GetBytes([uint32]$data.Length)); $body.AddRange($data)
+        $e = New-Object System.Collections.Generic.List[byte]
+        $e.AddRange([Text.Encoding]::ASCII.GetBytes('10ts')); $e.AddRange([BitConverter]::GetBytes([uint32]0x12345678)); $e.AddRange([BitConverter]::GetBytes([uint32]$body.Count)); $e.AddRange($body)
+        return ,$e.ToArray() }
+    foreach ($hdr in 0x30, 0x34) {
+        $blob = New-Object System.Collections.Generic.List[byte]
+        $h = New-Object byte[] $hdr; [BitConverter]::GetBytes([int32]$hdr).CopyTo($h, 0); $blob.AddRange($h)
+        $blob.AddRange((New-ShimEntry 'C:\Users\bob\Downloads\evil_test.exe' $when)); $blob.AddRange((New-ShimEntry 'C:\Windows\System32\notepad.exe' $when.AddDays(-30)))
+        $sc = @(ConvertFrom-ShimCache $blob.ToArray())
+        Assert-True "ShimCache (заголовок 0x$('{0:X}' -f $hdr)): 2 записи" ($sc.Count -eq 2)
+        Assert-True "ShimCache (заголовок 0x$('{0:X}' -f $hdr)): шлях і дата" ($sc[0].Path -eq 'C:\Users\bob\Downloads\evil_test.exe' -and $sc[0].LastModifiedUtc -eq $when -and $sc[1].Order -eq 1)
+    }
+    $bad = New-Object byte[] 128; [BitConverter]::GetBytes([int32]0x80).CopyTo($bad, 0)
+    Assert-True 'ShimCache: невідомий формат -> 0 записів' (@(ConvertFrom-ShimCache $bad).Count -eq 0)
+    $trunc = $blob.ToArray()[0..($blob.Count - 20)]
+    Assert-True 'ShimCache: обрізані дані -> без винятку, 1 запис' (@(ConvertFrom-ShimCache ([byte[]]$trunc)).Count -eq 1)
+
+    $onWin = ($PSVersionTable.PSEdition -ne 'Core') -or $IsWindows
+    if ($onWin) {
+        Test-Group 'Сліди запуску на цій Windows (реальні дані)'
+        $raw = $null; try { $raw = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache' -Name AppCompatCache -ErrorAction Stop).AppCompatCache } catch {}
+        if ($raw) {
+            $real = @(ConvertFrom-ShimCache ([byte[]]$raw))
+            Assert-True ("ShimCache цієї системи розібрано ({0} записів)" -f $real.Count) ($real.Count -gt 0)
+            Assert-True 'ShimCache: шляхи схожі на шляхи' (@($real | Where-Object { $_.Path -match '^(?i)([a-z]:\\|\\\\|SYSVOL\\|\\\?\?\\)' }).Count -ge [math]::Floor($real.Count * 0.8))
+        }
+        $cnt = @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist' -ErrorAction SilentlyContinue)
+        $okUa = $true
+        foreach ($g in $cnt) { $k = Get-Item -LiteralPath (Join-Path $g.PSPath 'Count') -ErrorAction SilentlyContinue; if (-not $k) { continue }
+            foreach ($vn in $k.GetValueNames()) { try { $null = ConvertFrom-UserAssistData ($k.GetValue($vn)) } catch { $okUa = $false } } }
+        Assert-True 'UserAssist поточного користувача читається без помилок' $okUa
+    }
 
     Test-Group 'FILETIME'
     Assert-True '2024'                    ((ConvertFrom-AdFileTime 133700000000000000).Year -eq 2024)

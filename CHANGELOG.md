@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.6.0] — 2026-09-25
+
+Execution traces — "was the file run, by whom and when" where Prefetch is off (servers) and 4688/Sysmon are not set up.
+One new, independent step; existing steps unchanged. Status: parser check, 157 unit tests (incl. synthetic
+UserAssist/ShimCache blobs); Windows validation in CI (smoke run now uses `-CollectHives`).
+
+### Added
+- **Step 5.10 — execution traces**, report section **13.1**, CSVs in `05_artifacts\`:
+  - **UserAssist** for loaded user hives: decoded (ROT13) program path with KNOWNFOLDER GUIDs resolved, run count,
+    focus count/time, last run time (Win7+ 72-byte and XP 16-byte formats).
+  - **RunMRU** (Win+R history) in MRU order, each command checked with the existing LOLBin / suspicious-argument /
+    IOC logic.
+  - **ShimCache / AppCompatCache** (Windows 10/11, Server 2016+): path, file modification time, order. Clearly
+    labelled as "seen by the system", not proof of execution.
+  - **Amcache** (with `-CollectHives`): `reg load` of a *working copy* of the verified copy → InventoryApplicationFile
+    (path, SHA1, publisher, version, link date) → `reg unload`, recorded in custody; the working copy is deleted.
+- Parameter **`-IocSha1`** — matched against Amcache SHA1; hits go to IOC matches and are Critical flags.
+- Flags (area "Виконання") for mask/IOC matches; RunMRU flagged only for suspicious arguments or IOC matches.
+  Timeline entries for UserAssist last runs and ShimCache file dates of matches.
+
+### Changed
+- CI runs on push only for `main` (pull requests are still checked), no more duplicate runs.
+- Smoke test runs with `-CollectHives`, prints execution-trace row counts and fails if an Amcache hive is left mounted.
+
 ## [1.5.0] — 2026-09-25
 
 First step of the road to 2.0: automated checks on real Windows. The collector's behaviour is unchanged.
