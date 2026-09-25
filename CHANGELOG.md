@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.3] — 2026-09-25
+
+### Added
+- Step 2.10: new check "Non-standard direct members of Administrators on a DC". The built-in Administrators group on
+  a domain controller equals domain admin rights; expected direct members are only Administrator (RID 500), Domain
+  Admins (512) and Enterprise Admins (519). Anyone else is reported as a Medium risk with object class.
+
 ## [1.4.2] — 2026-09-25
 
 ### Fixed

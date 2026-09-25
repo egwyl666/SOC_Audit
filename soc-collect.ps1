@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    SOC Live Response Collector v1.4.2 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
+    SOC Live Response Collector v1.4.3 — єдиний скрипт збору доказів і первинного аналізу Windows-хоста.
     Об'єднує: основний аудит (служби / задачі / firewall / журнали), fwlog (pfirewall.log) і filesinter (файлові артефакти).
     Узгоджено з NIST SP 800-86: Collection -> Examination -> Analysis -> Reporting,
     "спочатку волатильні дані", hash ДО і ПІСЛЯ копіювання, chain of custody, фіксація версії інструмента.
@@ -153,7 +153,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.4.2'
+$ToolVersion = '1.4.3'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -1499,6 +1499,22 @@ if ($D.IsDC) {
             foreach ($m in $mem) { $objs.Add([pscustomobject]@{ Category = "Член групи $($g.N)"; Account = $m; Privileged = $true; PwdAgeDays = ''; Details = "прямий член $(Get-AdProp $gr[0] 'sAMAccountName')" }) }
             $st = 'info'; if ($g.N -eq 'Schema Admins' -and $mem.Count) { $st = 'risk' }
             Add-AdChk ("Склад групи {0} ({1})" -f $g.N, (Get-AdProp $gr[0] 'sAMAccountName')) ("{0} прямих членів: {1}" -f $mem.Count, (($mem | Select-Object -First 10) -join ', ')) $(if ($g.N -eq 'Schema Admins') { '0 (додавати лише на час змін схеми)' } else { 'мінімум, лише іменовані адмін-облікові записи' }) $st 'Середньо' 'Прибрати зайвих членів; вкладені групи перевірити окремо' 'Кожен член — повний контроль над доменом/лісом'
+            # Вбудована Administrators на DC = фактично права адміністратора домену. Штатні прямі члени: Administrator (RID 500),
+            # Domain Admins (512), Enterprise Admins (519). Будь-хто інший напряму — поза контролем груп і tiering.
+            if ($g.N -eq 'Administrators') {
+                $odd = @()
+                foreach ($mdn in @($gr[0].Properties['member'])) {
+                    $sidStr = ''; $cls = ''
+                    try {
+                        $me = [ADSI]("LDAP://" + ([string]$mdn -replace '/', '\/'))
+                        if ($me.objectSid -and $me.objectSid.Count) { $sidStr = ([Security.Principal.SecurityIdentifier]::new([byte[]]$me.objectSid[0], 0)).Value }
+                        $cls = [string](@($me.objectClass)[-1])
+                    } catch {}
+                    if ($sidStr -match '-(500|512|519)$') { continue }
+                    $odd += ("{0} ({1})" -f (([string]$mdn -split ',')[0] -replace '^CN=', ''), $(if ($cls) { $cls } else { '?' }))
+                }
+                Add-AdChk 'Нештатні прямі члени Administrators на DC' $(if ($odd.Count) { "{0}: {1}" -f $odd.Count, ($odd -join ', ') } else { 'немає' }) 'Лише Administrator, Domain Admins, Enterprise Admins' $(if ($odd.Count) { 'risk' } else { 'ok' }) 'Середньо' 'Прибрати облікові записи з вбудованої Administrators; права видавати через окремі адмін-облікові записи і групи' 'Членство у вбудованій Administrators на контролері домену = повний контроль над доменом (вхід на DC, NTDS.dit, DCSync)'
+            }
         }
 
         $D.AdConfig = Arr $rows
