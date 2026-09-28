@@ -34,6 +34,12 @@ if ($vis.Count -lt 20) { $fail += "event_visibility.csv: лише $($vis.Count) 
 $pePath = Join-Path $case.FullName '02_system\persistence_extended.csv'
 $pe = @(); if ((Test-Path -LiteralPath $pePath) -and -not ((Get-Content -LiteralPath $pePath -TotalCount 1) -like '#*')) { $pe = @(Import-Csv -LiteralPath $pePath) }
 if ($pe.Count -lt 3) { $fail += "persistence_extended.csv: лише $($pe.Count) рядків (очікувались хоча б LSA-пакети)" }
+$hrPath = Join-Path $case.FullName '02_system\eventlog_hourly.csv'
+$hr = @(); if ((Test-Path -LiteralPath $hrPath) -and -not ((Get-Content -LiteralPath $hrPath -TotalCount 1) -like '#*')) { $hr = @(Import-Csv -LiteralPath $hrPath) }
+if ($hr.Count -lt 24) { $fail += "eventlog_hourly.csv: лише $($hr.Count) рядків" }
+$rep = Get-Content -LiteralPath (Join-Path $case.FullName 'report.html') -Raw
+if ($rep -notmatch "<svg class='hourly'") { $fail += 'у звіті немає графіка подій по годинах' }
+if ($rep -match '1999-11-(29|30)') { $fail += 'у звіті лишилася службова дата задач 1999-11-30' }
 Write-Host '--- Розширена персистентність'
 $pe | Format-Table Category, Name, Status, Severity, Signer -AutoSize | Out-String -Width 220 | Write-Host
 Write-Host '--- Видимість за категоріями подій'
