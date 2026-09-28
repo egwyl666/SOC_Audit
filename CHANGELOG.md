@@ -17,7 +17,7 @@ Accuracy fixes found in the DC01 report, and one chart where it helps.
   and the timeline). Now empty in the tables, "ніколи" in the flag text, and not added to the timeline.
 - Task flags with no author showed "(автор: )"; now "(автор: —)".
 - Summary tile "Копій VERIFIED" counted `.evtx` exports (which have no before/after hash) as unverified copies
-  (20/39 on DC01). Now it shows verified copies of copies only, with exports counted separately.
+  (20/39 on DC01). Now it counts copies only (verified / all copies), with exports shown separately.
 - pfirewall.log: ICMPv6 from link-local `fe80::` addresses (neighbour/router discovery) is no longer reported as a
   ping sweep.
 - pfirewall.log: RDP from an address that has an active RDP session at collection time (normally the analyst running
