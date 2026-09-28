@@ -41,13 +41,13 @@ Windows, режим `FullLanguage`. Якщо щось не так — зрозу
 виводить її SHA256 і запускає повний збір за останні 24 години; після завершення відкривається звіт.
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_Audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24
 ```
 
 Для реального інциденту додайте свої IOC і пишіть результати на зовнішній диск:
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24 -NamePatterns '*evil*' -IocIPs '203.0.113.5' -OutRoot 'E:\SOC_Evidence'
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_Audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24 -NamePatterns '*evil*' -IocIPs '203.0.113.5' -OutRoot 'E:\SOC_Evidence'
 ```
 
 > Увага: без IOC скрипт працює як аудит хоста: усе збирається, пропускається лише пошук за масками імен, hash і IP

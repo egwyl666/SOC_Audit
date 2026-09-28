@@ -43,13 +43,13 @@ Open PowerShell **as Administrator** and paste one line. It downloads the latest
 SHA256 and runs a full collection for the last 24 hours; the report opens when it finishes.
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_Audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24
 ```
 
 For a real incident, add your IOCs and write the results to an external drive:
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24 -NamePatterns '*evil*' -IocIPs '203.0.113.5' -OutRoot 'E:\SOC_Evidence'
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; $f="$env:TEMP\soc-collect.ps1"; iwr 'https://raw.githubusercontent.com/egwyl666/SOC_Audit/main/soc-collect.ps1' -OutFile $f -UseBasicParsing; "SHA256: $((Get-FileHash $f).Hash)"; powershell -NoProfile -ExecutionPolicy Bypass -File $f -CaseId "AUTO-$env:COMPUTERNAME" -Hours 24 -NamePatterns '*evil*' -IocIPs '203.0.113.5' -OutRoot 'E:\SOC_Evidence'
 ```
 
 > Note: without IOCs the script runs as a host audit: everything is collected, only the search by name masks,
