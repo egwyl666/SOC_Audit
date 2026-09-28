@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.9.1] — 2026-09-28
+
+Fixes after the DC01 run of 1.9.0.
+
+### Fixed
+- Step 2.12: Active Setup entries whose StubPath is not a file path (`U`, `/UserInstall` — known Windows leftovers,
+  shown by Autoruns as "File not found") were flagged "Середньо — Файл відсутній". They are now listed as
+  "Інфо — Не шлях до файлу (штатний залишок Windows)".
+- Report, 4624 table: the `Elevated` column showed raw `%%1842` / `%%1843`; now "Так" / "Ні".
+- Unit tests: two IPv6 checks still used the old test address after the IOC addresses were changed on `main`.
+
 ## [1.9.0] — 2026-09-25
 
 Extended persistence.
