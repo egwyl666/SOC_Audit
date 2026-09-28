@@ -147,7 +147,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.9.0'
+$ToolVersion = '1.9.1'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -1970,6 +1970,8 @@ Invoke-Step "2.12 Розширена персистентність: LSA, AppIni
         foreach ($c in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
             $sp = [string](Get-RegVal $c.PSPath 'StubPath')
             if (-not $sp) { continue }
+            # StubPath без шляху й розширення ('U', '/UserInstall') — штатні залишки Windows, нічого не запускають (Autoruns: «File not found»)
+            if ($sp -notmatch '\\' -and $sp -notmatch '(?i)\.(exe|dll|cmd|bat|com|scr|ps1|vbs|js|hta|msi)\b') { Add-VRow 'Active Setup' ($root -replace '^HKLM:\\', 'HKLM\') $c.PSChildName $sp 'Не шлях до файлу (штатний залишок Windows)' 'Інфо' 'StubPath без виконуваного файлу нічого не запускає'; continue }
             Add-PRow 'Active Setup' ($root -replace '^HKLM:\\', 'HKLM\') $c.PSChildName $sp (Resolve-PersistPath $sp '.exe') 'Виконується при першому вході кожного користувача (T1547.014)'
         }
     }
@@ -2051,7 +2053,7 @@ Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776,
             TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); EventId = 4624
             TargetUser = ("{0}\{1}" -f $evd['TargetDomainName'], $evd['TargetUserName']); LogonType = (Get-LogonTypeText $evd['LogonType'])
             SourceIP = $evd['IpAddress']; Workstation = $evd['WorkstationName']; LogonProcess = ([string]$evd['LogonProcessName']).Trim()
-            AuthPackage = $evd['AuthenticationPackageName']; LogonId = $evd['TargetLogonId']; Elevated = $evd['ElevatedToken']; CallerProcess = $evd['ProcessName']
+            AuthPackage = $evd['AuthenticationPackageName']; LogonId = $evd['TargetLogonId']; Elevated = $(switch ([string]$evd['ElevatedToken']) { '%%1842' { 'Так' } '%%1843' { 'Ні' } default { $evd['ElevatedToken'] } }); CallerProcess = $evd['ProcessName']
         }
     }
     $D.Ev4624 = Arr ($rows | Sort-Object TimeUtc)
