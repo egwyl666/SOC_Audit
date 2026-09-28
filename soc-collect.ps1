@@ -147,7 +147,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.9.1'
+$ToolVersion = '1.9.2'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -223,7 +223,7 @@ $DataKeys = 'TcpRaw','UdpRaw','ProcRaw','Procs','Tcp','Udp','Arp','Dns','IpAddr'
             'LocalUsers','LocalAdmins','Services','Tasks','Autoruns','WmiPersist','MpExclusions','MpStatusRows','Licensing','KmsReg',
             'FwProfiles','FwRules','Ev4625','Ev4624','OtherAuth','LogCleared','Rdp','RdpSummary','SvcEvents','TaskEvents',
             'FwEvents','MpEvents','Exec','SysmonMisc','Ps4104','FwByPort','FwBySource','FwIocRaw','FwSvcHits','KnownFiles',
-            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','UserAssist','RunMru','ShimCache','Amcache','TasksAll','FwRulesAll','PrefetchAll','MpFull','LogInventory','EventVisibility','PersistExt','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
+            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','UserAssist','RunMru','ShimCache','Amcache','TasksAll','FwRulesAll','PrefetchAll','MpFull','LogInventory','EventVisibility','PersistExt','LogHourly','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
 foreach ($k in $DataKeys) { $D[$k] = @() }
 
 $Lolbins = @('netsh.exe','wmic.exe','reg.exe','sc.exe','schtasks.exe','cscript.exe','wscript.exe','mshta.exe','rundll32.exe',
@@ -688,6 +688,34 @@ function Get-EventIdCount24h {   # подій з вказаними Event ID з�
     } catch { return $null }
     finally { if ($reader) { $reader.Dispose() } }
     return [pscustomobject]@{ Total = $n; ById = $by; Capped = $cap }
+}
+function Get-HourlyEventCounts {   # події каналу по годинах за 24 год до $At: Counts[0..23] (0 = найстаріша година), Capped; $null — канал недоступний
+    param([string]$Log, [datetime]$At, [int]$Limit = 300000)
+    $from = $At.AddHours(-24)
+    $xp = Get-EventIdXPath @() $from $At
+    $cnt = New-Object 'int[]' 24; $n = 0; $cap = $false; $reader = $null
+    try {
+        $q = New-Object System.Diagnostics.Eventing.Reader.EventLogQuery($Log, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $xp)
+        $reader = New-Object System.Diagnostics.Eventing.Reader.EventLogReader($q)
+        while ($null -ne ($ev = $reader.ReadEvent())) {
+            $t = $ev.TimeCreated; $ev.Dispose()
+            if ($t) { $i = [int][math]::Floor(($t - $from).TotalHours); if ($i -ge 0 -and $i -lt 24) { $cnt[$i]++ } }
+            $n++; if ($n -ge $Limit) { $cap = $true; break }
+        }
+    } catch { return $null }
+    finally { if ($reader) { $reader.Dispose() } }
+    return [pscustomobject]@{ Counts = $cnt; Capped = $cap }
+}
+function Get-HourGaps {   # години з 0 подій між годинами з подіями (прогалини), як діапазони індексів «a-b»
+    param([int[]]$Counts)
+    $nz = @(for ($i = 0; $i -lt $Counts.Count; $i++) { if ($Counts[$i] -gt 0) { $i } })
+    if ($nz.Count -lt 2) { return @() }
+    $out = New-Object System.Collections.Generic.List[object]; $start = -1
+    for ($i = $nz[0]; $i -le $nz[-1]; $i++) {
+        if ($Counts[$i] -eq 0) { if ($start -lt 0) { $start = $i } }
+        elseif ($start -ge 0) { $out.Add([pscustomobject]@{ From = $start; To = ($i - 1); Hours = ($i - $start) }); $start = -1 }
+    }
+    return $out.ToArray()
 }
 function Get-VisibilityStatus {   # Бачимо / Частково / НЕ бачимо / Невідомо за станом джерела ($true/$false/$null) і кількістю подій за 24 год
     param($Enabled, [bool]$Partial, $Events)
@@ -1179,7 +1207,9 @@ Invoke-Step "2.3 Задачі планувальника: автор (з XML з�
         }
         $last = ''; $next = ''; $res = ''
         if ($info) {
-            $last = U $info.LastRunTime; $next = U $info.NextRunTime
+            # 1999-11-30 — службова дата Планувальника «ще не запускалась»
+            if ($info.LastRunTime -and ([datetime]$info.LastRunTime).Year -ge 2000) { $last = U $info.LastRunTime }
+            if ($info.NextRunTime -and ([datetime]$info.NextRunTime).Year -ge 2000) { $next = U $info.NextRunTime }
             if ($null -ne $info.LastTaskResult) { $res = ('0x{0:X}' -f [int64]$info.LastTaskResult) }
         }
         $reg = ''; if ($t.Date) { $reg = U $t.Date }
@@ -2021,6 +2051,27 @@ Invoke-Step "2.12 Розширена персистентність: LSA, AppIni
     Save-Csv $D.PersistExt '02_system\persistence_extended.csv'
 }
 
+# ════════════════════════════════════ 2.13 ПОГОДИННИЙ ОБСЯГ ПОДІЙ ════════════════════════════════════
+# Скільки подій пише кожен ключовий канал щогодини за останні 24 год. Година з 0 подій між годинами з подіями —
+# прогалина: служба журналу зупинялась, аудит вимикали або журнал очищали (T1562.002 / T1070.001).
+Invoke-Step "2.13 Погодинний обсяг подій за 24 год (прогалини в надходженні логів)" {
+    $from = $RunStart.AddHours(-24)
+    $rows = New-Object System.Collections.Generic.List[object]
+    $series = New-Object System.Collections.Generic.List[object]
+    foreach ($log in 'Security', 'System', 'Microsoft-Windows-Sysmon/Operational', 'Microsoft-Windows-PowerShell/Operational', 'Microsoft-Windows-TaskScheduler/Operational') {
+        $h = Get-HourlyEventCounts $log $RunStart
+        if ($null -eq $h) { continue }
+        # Прогалини — лише для каналів, що пишуть у середньому ≥ 5 подій/год: у «тихих» каналах порожня година — норма
+        $gaps = @(); if ((($h.Counts | Measure-Object -Sum).Sum) -ge 120) { $gaps = @(Get-HourGaps $h.Counts) }
+        $series.Add([pscustomobject]@{ Log = $log; Counts = $h.Counts; Capped = $h.Capped; Gaps = $gaps })
+        for ($i = 0; $i -lt 24; $i++) {
+            $rows.Add([pscustomobject]@{ Log = $log; HourStartLocal = $from.AddHours($i).ToString('yyyy-MM-dd HH:mm'); HourStartUtc = (U $from.AddHours($i)); Events = $h.Counts[$i]; Capped = $h.Capped })
+        }
+    }
+    $D.LogHourly = Arr $series
+    Save-Csv (Arr $rows) '02_system\eventlog_hourly.csv'
+}
+
 # ════════════════════════════════════ 3. ЖУРНАЛИ ПОДІЙ ЗА ВІКНО ════════════════════════════════════
 Invoke-Step "3.1 Автентифікація: 4625 / 4624 / 4648 / 4740 / 4776, зміни облікових записів, очищення журналів" {
     $rows = foreach ($e in (Get-Ev 'Security' @(4625))) {
@@ -2554,13 +2605,18 @@ Invoke-Step "4. pfirewall.log: зведення по портах і джере�
         [pscustomobject]@{ Protocol = $parts[0]; DstPort = $parts[1]; Allow = $_.Value.Allow; Drop = $_.Value.Drop; Total = ($_.Value.Allow + $_.Value.Drop); UniqueSources = $_.Value.Srcs.Count
             Sources = ((@($_.Value.Srcs) | Select-Object -First 15) -join ', ') }
     } | Sort-Object Total -Descending)
+    # Джерела активних RDP-сесій на момент знімка (зазвичай — сам аналітик, що запустив збір)
+    $rdpNow = @($D.Tcp | Where-Object { $_.State -eq 'Established' -and [string]$_.LocalPort -eq '3389' } | ForEach-Object { Get-NormIP ([string]$_.RemoteAddress) } | Select-Object -Unique)
     $D.FwBySource = Arr ($bySrc.GetEnumerator() | ForEach-Object {
         $v = $_.Value; $ip = $_.Key; $isOwn = ($own -contains $ip)
         $h = @()
         if (-not $isOwn) {
             if (Test-IocIPEq $ip) { $h += 'IOC IP' }
-            if ($v.Icmp -ge 20) { $h += ("ICMP ×{0} — можлива розвідка (ping sweep)" -f $v.Icmp) }
-            if (@($v.Ports | Where-Object { $_ -in '3389', '5985', '5986', '22' }).Count -gt 0) { $h += 'Звернення до RDP/WinRM/SSH' }
+            # ICMPv6 з link-local (fe80::) — Neighbor/Router Discovery, штатний шум IPv6
+            if ($v.Icmp -ge 20 -and $ip -notmatch '^(?i)fe80:') { $h += ("ICMP ×{0} — можлива розвідка (ping sweep)" -f $v.Icmp) }
+            if (@($v.Ports | Where-Object { $_ -in '3389', '5985', '5986', '22' }).Count -gt 0) {
+                if ($rdpNow -contains $ip) { $h += 'Звернення до RDP (активна RDP-сесія на момент збору — імовірно оператор)' } else { $h += 'Звернення до RDP/WinRM/SSH' }
+            }
             # На контролері домену SMB/RPC з внутрішніх адрес без DROP — штатний трафік клієнтів домену (GPO, SYSVOL, реплікація)
             if (@($v.Ports | Where-Object { $_ -in '445', '139', '135' }).Count -gt 0 -and -not ($D.IsDC -and (Test-PrivateIP $ip) -and $v.Drop -eq 0)) { $h += 'Звернення до SMB/RPC' }
             if ($v.Drop -ge 20) { $h += ("Багато DROP ({0})" -f $v.Drop) }
@@ -3030,13 +3086,13 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     foreach ($t in @($D.Tasks)) {
         $tf = [string]$t.Flags; if ($UsingDefaultIoc) { $tf = $tf -replace 'Збіг з маскою IOC', '' }
         $sev = 'Інфо'; if ($tf -match 'IOC|Дія:|Прихована|Маскування') { $sev = 'Високо' }
-        if ($sev -ne 'Інфо' -or $t.Flags -match 'Стороння') { Add-Flag $sev 'Задачі' ("Задача '{0}{1}' (автор: {2})" -f $t.TaskPath, $t.TaskName, $t.Author) ("{0}; дії: {1}; ост. запуск: {2}; {3}" -f $t.State, $t.Actions, $t.LastRunUtc, $t.Flags) 'tasks' }
+        if ($sev -ne 'Інфо' -or $t.Flags -match 'Стороння') { Add-Flag $sev 'Задачі' ("Задача '{0}{1}' (автор: {2})" -f $t.TaskPath, $t.TaskName, $(if ($t.Author) { $t.Author } else { '—' })) ("{0}; дії: {1}; ост. запуск: {2}; {3}" -f $t.State, $t.Actions, $(if ($t.LastRunUtc) { $t.LastRunUtc } else { 'ніколи' }), $t.Flags) 'tasks' }
     }
     foreach ($r in @($D.TaskEvents | Where-Object { $_.EventId -eq 4698 })) { $sev = 'Середньо'; if ($r.Match) { $sev = 'Високо' }; Add-Flag $sev 'Задачі' ("Створено задачу {0}" -f $r.TaskName) ("{0}; {1}; {2}" -f $r.TimeLocal, $r.Actor, $r.Command) 'tasks' }
     $fwManual = @($D.FwEvents | Where-Object { $_.Category -notlike 'Windows*' -and $_.EventId -in 2004, 2097, 2006, 2052, 2005, 2099, 4946, 4947, 4948 })
     foreach ($r in $fwManual) { $sev = 'Середньо'; if ($r.Match) { $sev = 'Високо' }; Add-Flag $sev 'Firewall' ("{0}: {1}" -f $r.Meaning, $r.RuleName) ("{0}; порти {1}/{2}; {3}; ким: {4}" -f $r.TimeLocal, $r.LocalPorts, $r.RemotePorts, $r.ModifyingApp, $r.ModifiedBy) 'firewall' }
     foreach ($r in @($D.FwRules | Where-Object { $_.Flags })) { Add-Flag 'Середньо' 'Firewall' ("Активне правило: {0}" -f $r.DisplayName) ("{0} {1} {2}/{3} {4} — {5}" -f $r.Direction, $r.Action, $r.Protocol, $r.LocalPort, $r.Program, $r.Flags) 'firewall' }
-    foreach ($s in @($D.FwBySource | Where-Object { $_.Heuristic -and -not $_.Own })) { $sev = 'Середньо'; if ($s.Heuristic -match 'IOC') { $sev = 'Високо' }; Add-Flag $sev 'Мережа' ("pfirewall.log: {0}" -f $s.SourceIP) ("{0}; ALLOW {1} / DROP {2}; порти {3}; {4} → {5}" -f $s.Heuristic, $s.Allow, $s.Drop, $s.DstPorts, $s.FirstLocal, $s.LastLocal) 'firewall' }
+    foreach ($s in @($D.FwBySource | Where-Object { $_.Heuristic -and -not $_.Own })) { $sev = 'Середньо'; if ($s.Heuristic -match 'IOC') { $sev = 'Високо' } elseif ($s.Heuristic -match '^Звернення до RDP \(активна RDP-сесія[^;]*$') { $sev = 'Інфо' }; Add-Flag $sev 'Мережа' ("pfirewall.log: {0}" -f $s.SourceIP) ("{0}; ALLOW {1} / DROP {2}; порти {3}; {4} → {5}" -f $s.Heuristic, $s.Allow, $s.Drop, $s.DstPorts, $s.FirstLocal, $s.LastLocal) 'firewall' }
     foreach ($x in @($D.MpExclusions)) { Add-Flag 'Високо' 'Defender' ("Виняток Defender ({0})" -f $x.Type) ("{0} [{1}]" -f $x.Value, $x.PathClass) 'defender' }
     $rtp = @($D.MpStatusRows | Where-Object { $_.Setting -eq 'RealTimeProtectionEnabled' -and $_.Value -eq 'False' })
     if ($rtp.Count) { Add-Flag 'Критично' 'Defender' 'Real-time protection ВИМКНЕНО' 'Get-MpComputerStatus' 'defender' }
@@ -3081,6 +3137,13 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     foreach ($r in @($D.RunMru | Where-Object { $_.Match -or $_.Reason -match 'Підозрілі|IOC' })) { Add-Flag 'Середньо' 'Виконання' ("RunMRU (Win+R): {0}" -f $r.Command) ("{0} — {1}" -f $r.Profile, $(if ($r.Reason) { $r.Reason } else { 'Збіг з маскою IOC' })) 'traces' }
     foreach ($r in @($D.ShimCache | Where-Object { $_.Match })) { Add-Flag 'Середньо' 'Виконання' ("ShimCache: {0}" -f $r.Path) ("позиція {0}; дата зміни файлу {1} (це не час запуску)" -f $r.Order, $r.LastModifiedUtc) 'traces' }
     foreach ($r in @($D.Amcache | Where-Object { $_.Match -and -not $_.IocSha1 })) { Add-Flag 'Середньо' 'Виконання' ("Amcache: {0}" -f $r.Path) ("SHA1 {0}; {1} {2}" -f $r.SHA1, $r.Publisher, $r.Version) 'traces' }
+    # Прогалини в Security: година за годиною без жодної події між годинами з подіями
+    foreach ($sr in @($D.LogHourly | Where-Object { $_.Log -eq 'Security' })) {
+        foreach ($g in @($sr.Gaps | Where-Object { $_.Hours -ge 2 })) {
+            $a = $RunStart.AddHours(-24 + $g.From); $z = $RunStart.AddHours(-24 + $g.To + 1)
+            Add-Flag 'Середньо' 'Журнали' ("Прогалина в журналі Security: {0} год без подій" -f $g.Hours) ("{0} → {1} (лок.). До і після події є — можливі зупинка служби журналу, вимкнення аудиту або очищення (T1562.002 / T1070.001)" -f $a.ToString('yyyy-MM-dd HH:mm'), $z.ToString('yyyy-MM-dd HH:mm')) 'logs'
+        }
+    }
     # Аудит зараз вимкнено, а події цієї категорії за добу є: політику аудиту змінили нещодавно (T1562.002?)
     foreach ($v in @($D.EventVisibility | Where-Object { $_.AuditChanged })) { Add-Flag 'Середньо' 'Журнали' ("Аудит вимкнено, але за добу є події: {0} ({1})" -f $v.Category, $v.EventIds) $v.Comment 'logs' }
     $badAud = @($D.AuditSettings | Where-Object { $_.OK -eq $false })
@@ -3177,6 +3240,38 @@ function HT {
 }
 function KV { param($Obj) if ($null -eq $Obj) { return "<p class='empty'>Немає даних.</p>" }; $sb = New-Object System.Text.StringBuilder; [void]$sb.Append("<table class='kv'>"); foreach ($p in $Obj.PSObject.Properties) { [void]$sb.Append("<tr><td>$(E $p.Name)</td><td>$(E $p.Value)</td></tr>") }; [void]$sb.Append('</table>'); return $sb.ToString() }
 function Pre { param([string]$t) return "<pre>$(E $t)</pre>" }
+function Get-HourlySvg {   # малі мультиплі: рядок на канал, 24 стовпці по годинах; шкала кожного рядка своя
+    param([object[]]$Series, [datetime]$From)
+    $lw = 250; $bw = 22; $gap = 2; $rh = 46; $top = 6; $plotW = 24 * ($bw + $gap); $w = $lw + $plotW + 70; $h = $top + $Series.Count * $rh + 22
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("<svg class='hourly' viewBox='0 0 $w $h' width='100%' style='max-width:${w}px' role='img' aria-label='Події по годинах за 24 години'>")
+    $y0 = $top
+    foreach ($sr in $Series) {
+        $max = [math]::Max(1, ($sr.Counts | Measure-Object -Maximum).Maximum)
+        $base = $y0 + $rh - 12; $ph = $rh - 16
+        $name = ($sr.Log -replace '^Microsoft-Windows-', '')
+        [void]$sb.Append("<text x='0' y='$($base - 8)' class='hl'>$(E $name)</text>")
+        [void]$sb.Append("<line x1='$lw' y1='$base' x2='$($lw + $plotW)' y2='$base' class='hb'/>")
+        $gapIdx = @(); foreach ($g in @($sr.Gaps)) { for ($k = $g.From; $k -le $g.To; $k++) { $gapIdx += $k } }
+        for ($i = 0; $i -lt 24; $i++) {
+            $c = [int]$sr.Counts[$i]; $x = $lw + $i * ($bw + $gap)
+            $t0 = $From.AddHours($i).ToString('dd.MM HH:00'); $tip = "{0} — {1}: {2} под." -f $name, $t0, $c
+            if ($c -gt 0) {
+                $bh = [math]::Max(2, [math]::Round($ph * $c / $max, 1)); $y = $base - $bh; $r = [math]::Min(4, $bh / 2)
+                [void]$sb.Append(("<path class='hv' d='M{0},{1} V{2} Q{0},{3} {4},{3} H{5} Q{6},{3} {6},{2} V{1} Z'><title>{7}</title></path>" -f $x, $base, ($y + $r), $y, ($x + $r), ($x + $bw - $r), ($x + $bw), (E $tip)))
+            } elseif ($gapIdx -contains $i) {
+                [void]$sb.Append("<rect class='hg' x='$x' y='$($base - $ph)' width='$bw' height='$ph'><title>$(E ($tip + ' — прогалина'))</title></rect>")
+            } else {
+                [void]$sb.Append("<rect class='hz' x='$x' y='$($base - 2)' width='$bw' height='2'><title>$(E $tip)</title></rect>")
+            }
+        }
+        [void]$sb.Append("<text x='$($lw + $plotW + 6)' y='$($base - $ph + 8)' class='hm'>макс. $max$(if ($sr.Capped) { '+' })</text>")
+        $y0 += $rh
+    }
+    for ($i = 0; $i -lt 24; $i += 3) { [void]$sb.Append("<text x='$($lw + $i * ($bw + $gap))' y='$($h - 6)' class='hm'>$($From.AddHours($i).ToString('HH:00'))</text>") }
+    [void]$sb.Append('</svg>')
+    return $sb.ToString()
+}
 function H3  { param([string]$t, [string]$note = '') $x = "<h3>$(E $t)</h3>"; if ($note) { $x += "<p class='muted'>$(E $note)</p>" }; return $x }
 function Sec {
     param([string]$Id, [string]$Title, [string]$Body, [switch]$Open, [int]$Count = -1)
@@ -3209,12 +3304,13 @@ Invoke-Step "8. Формування HTML-звіту" {
     }
 
     $verified = @($Integrity | Where-Object { $_.Status -like 'VERIFIED*' }).Count
+    $copiesAll = @($Integrity | Where-Object { $_.Status -notlike 'EXPORT*' }).Count   # експорт .evtx не має «до/після» — рахуємо окремо
     $cards = @(
         @('c', $cntSev['Критично'], 'Критичні прапорці'), @('h', $cntSev['Високо'], 'Високі прапорці'), @('m', $cntSev['Середньо'], 'Середні прапорці'),
         @('', @($D.Ev4625).Count, 'Невдалих входів (4625)'), @('', @($D.BruteForce | Where-Object { $_.Attempts -ge 10 }).Count, 'Серій brute-force (≥10)'),
         @('', @($D.SvcEvents | Where-Object { $_.EventId -ne 7040 }).Count, 'Встановлень служб'), @('', @($D.TaskEvents | Where-Object { $_.EventId -eq 4698 }).Count, 'Створено задач'),
         @('', @($D.FwEvents).Count, 'Змін правил firewall'), @('', @($D.IocHits).Count, 'IOC-збігів'),
-        @('', @($D.WideHigh).Count, 'Цікавих файлів за масками'), @('', ("{0}/{1}" -f $verified, $Integrity.Count), 'Копій VERIFIED')
+        @('', @($D.WideHigh).Count, 'Цікавих файлів за масками'), @('', ("{0}/{1}" -f $verified, $copiesAll), $(if ($copiesAll -lt $Integrity.Count) { "Копій VERIFIED (+{0} експорт журналів)" -f ($Integrity.Count - $copiesAll) } else { 'Копій VERIFIED' }))
     )
     $cardsHtml = "<div class='cards'>" + ((@($cards | ForEach-Object { "<div class='card $($_[0])'><div class='n'>$(E $_[1])</div><div class='l'>$(E $_[2])</div></div>" })) -join '') + '</div>'
 
@@ -3278,6 +3374,13 @@ Invoke-Step "8. Формування HTML-звіту" {
     $b = (H3 ("Обсяг подій за останні 24 години (за станом на {0})" -f $RunStart.ToString('dd.MM.yyyy HH:mm')) 'Подій / 24 год — точний підрахунок за часом події; «≈» — оцінка за номерами записів для дуже великих каналів (понад 100 000 за добу). Повні дані: 02_system\eventlog_health.csv; усі канали системи — розділ 4.') +
          (HT ($lhRows | Select-Object 'Канал', 'Подій / 24 год', 'Всього записів', 'Розмір, МБ (макс.)', 'Заповнено, %', 'Історія, дн.', 'Режим', 'Стан', '_sev', '_off') -Cols @('Канал', 'Подій / 24 год', 'Всього записів', 'Розмір, МБ (макс.)', 'Заповнено, %', 'Історія, дн.', 'Режим', 'Стан') -RowClass { param($r) if ($r._off) { 'bad' } elseif ($r.'Стан' -eq 'Вікно не покрите') { 'bad' } elseif ($r._sev -in 'Високо', 'Середньо') { 'warn' } }) +
          (H3 'Показник / Значення') + (KV $kvObj)
+    # ── Погодинний обсяг (крок 2.13): прогалини видно одразу ──
+    $hs = @($D.LogHourly)
+    if ($hs.Count) {
+        $gapTxt = @($hs | ForEach-Object { $sr = $_; @($sr.Gaps) | ForEach-Object { "{0}: {1} → {2}" -f ($sr.Log -replace '^Microsoft-Windows-', ''), $RunStart.AddHours(-24 + $_.From).ToString('HH:00'), $RunStart.AddHours(-24 + $_.To + 1).ToString('HH:00') } })
+        $b += (H3 'Події по годинах за 24 години' ("Кожен стовпець — одна година (місцевий час), шкала своя для кожного каналу. Сіра смуга — година без подій між годинами з подіями (прогалина; позначається лише для каналів із ≥ 5 подій/год у середньому). Наведіть на стовпець, щоб побачити кількість. Дані: 02_system\eventlog_hourly.csv. Прогалини: {0}" -f $(if ($gapTxt.Count) { $gapTxt -join '; ' } else { 'немає' }))) +
+              (Get-HourlySvg $hs $RunStart.AddHours(-24))
+    }
     # ── 1.2 Видимість за категоріями подій (крок 2.11) ──
     $vis = @($D.EventVisibility)
     if ($vis.Count) {
@@ -3433,6 +3536,7 @@ td{padding:6px 9px;border-bottom:1px solid #e1e5eb;vertical-align:top;word-break
 tr.off td{color:#8a929c;background:#f6f7f9}tr.bad td{background:#fde8e8}tr.warn td{background:#fff4e0}tr.good td{background:#eef8ee}tr.info td{background:#eef3fb}
 .sev{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;color:#fff;white-space:nowrap}.s0{background:#7f0000}.s1{background:#c62828}.s2{background:#b45309}.s3{background:#2f5496}
 pre{background:#0f1720;color:#dfe6ee;padding:12px;border-radius:8px;overflow:auto;max-height:420px;font-size:12px;white-space:pre-wrap}
+.hourly{display:block;margin:6px 0 14px}.hourly .hl{font-size:12px;fill:#1b1f24}.hourly .hm{font-size:11px;fill:#6b7480}.hourly .hb{stroke:#c9ced6;stroke-width:1}.hourly .hv{fill:#2a78d6}.hourly .hv:hover{fill:#1c5aa6}.hourly .hz{fill:#c9ced6}.hourly .hg{fill:#e3e6ea}.hourly .hg:hover{fill:#d0d5dc}
 .empty{color:#7a838f;font-style:italic}.muted{color:#6b7480;font-size:12px;margin:4px 0}.kv td:first-child{font-weight:600;color:#44505e;width:300px;background:#f7f9fc}
 code{background:#eef1f5;padding:1px 5px;border-radius:4px;font-size:11.5px}.pill{display:inline-block;background:#eef2f8;color:#1f3864;border-radius:999px;padding:1px 9px;font-size:11px}
 footer{color:#7a838f;font-size:12px;text-align:center;padding:20px}@media print{nav{display:none}.scroll{max-height:none}}

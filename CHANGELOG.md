@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.9.2] — 2026-09-28
+
+Accuracy fixes found in the DC01 report, and one chart where it helps.
+
+### Added
+- Step **2.13 "Погодинний обсяг подій"**: events per hour over the last 24 h for Security, System, Sysmon,
+  PowerShell/Operational and TaskScheduler/Operational (`02_system\eventlog_hourly.csv`).
+- Report section 1.1: chart "Події по годинах за 24 години" — one row per channel, one bar per hour, own scale per row,
+  hover shows the count. Hours without events between busy hours are marked as gaps (only for channels that average at
+  least 5 events per hour, so quiet channels do not light up).
+- Flag (Середньо): a gap of 2+ hours in the Security log — possible service stop, audit disabled or log cleared.
+
+### Fixed
+- Scheduled tasks that never ran showed the Task Scheduler placeholder date `1999-11-30` as the last run (tables, flags
+  and the timeline). Now empty in the tables, "ніколи" in the flag text, and not added to the timeline.
+- Task flags with no author showed "(автор: )"; now "(автор: —)".
+- Summary tile "Копій VERIFIED" counted `.evtx` exports (which have no before/after hash) as unverified copies
+  (20/39 on DC01). Now it counts copies only (verified / all copies), with exports shown separately.
+- pfirewall.log: ICMPv6 from link-local `fe80::` addresses (neighbour/router discovery) is no longer reported as a
+  ping sweep.
+- pfirewall.log: RDP from an address that has an active RDP session at collection time (normally the analyst running
+  the tool) is marked as such and lowered to "Інфо".
+- Tests for gap detection, the chart SVG, and hourly counts vs the direct count on Windows; the smoke run checks the
+  hourly CSV, the chart and the absence of `1999-11-30` in the report.
+
 ## [1.9.1] — 2026-09-28
 
 Fixes after the DC01 run of 1.9.0.

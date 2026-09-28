@@ -191,6 +191,9 @@ try {
             Assert-True 'Get-EventIdCount24h: ліміт -> Capped' ((Get-EventIdCount24h 'System' $ids $now -Limit 1).Capped -eq ($direct -ge 1))
         }
         Assert-True 'Get-EventIdCount24h: неіснуючий канал -> null' ($null -eq (Get-EventIdCount24h 'SOC-Collect-No-Such/Log' @(1) $now))
+        $hh = Get-HourlyEventCounts 'System' $now
+        $sum = [int64](($hh.Counts | Measure-Object -Sum).Sum)
+        Assert-True ("Get-HourlyEventCounts System: сума {0} ≈ Get-LogEvents24h {1}" -f $sum, $e24) ($hh -and [math]::Abs($sum - [int64]$e24) -le 3 -and $hh.Counts.Count -eq 24)
     }
 
     Test-Group 'Кроки не перезаписують $D (імена змінних без урахування регістру)'
@@ -212,6 +215,19 @@ try {
     Assert-True 'без підпису = Високо'             ((Get-PersistVerdict $true 'NotSigned' '' 'Системний').Severity -eq 'Високо')
     Assert-True 'HashMismatch = Високо'            ((Get-PersistVerdict $true 'HashMismatch' 'Microsoft Windows' 'Системний').Severity -eq 'Високо')
     Assert-True 'файлу немає = Середньо'           ((Get-PersistVerdict $false '' '' '').Status -eq 'Файл відсутній')
+
+    Test-Group 'Погодинний обсяг: прогалини і графік'
+    $c = [int[]](@(5, 5, 0, 0, 3) + @(0) * 19)
+    $g = @(Get-HourGaps $c)
+    Assert-True 'одна прогалина 2-3 (2 год)'        ($g.Count -eq 1 -and $g[0].From -eq 2 -and $g[0].To -eq 3 -and $g[0].Hours -eq 2)
+    Assert-True 'нулі після останньої події — не прогалина' (@(Get-HourGaps ([int[]](@(1) + @(0) * 23))).Count -eq 0)
+    Assert-True 'порожній канал — без прогалин'     (@(Get-HourGaps (New-Object 'int[]' 24)).Count -eq 0)
+    Assert-True 'дві прогалини'                      (@(Get-HourGaps ([int[]](@(1, 0, 1, 0, 0, 1) + @(0) * 18))).Count -eq 2)
+    $svg = Get-HourlySvg @([pscustomobject]@{ Log = 'Security'; Counts = $c; Capped = $false; Gaps = $g }, [pscustomobject]@{ Log = 'Microsoft-Windows-Sysmon/Operational'; Counts = (New-Object 'int[]' 24); Capped = $true; Gaps = @() }) (Get-Date '2026-09-27 09:00')
+    $xmlOk = $true; try { [void][xml]$svg } catch { $xmlOk = $false }
+    Assert-True 'SVG — коректний XML'                $xmlOk
+    Assert-True 'SVG: 3 стовпці з подіями, 2 прогалини' (([regex]::Matches($svg, "class='hv'")).Count -eq 3 -and ([regex]::Matches($svg, "class='hg'")).Count -eq 2)
+    Assert-True 'SVG: підказки й назви каналів'      ($svg -match '<title>Security — 27\.09 09:00: 5 под\.</title>' -and $svg -match '>Sysmon/Operational<' -and $svg -match 'макс\. 1\+')
 
     Test-Group 'Видимість за категоріями подій'
     $xp = Get-EventIdXPath @(4624, 4625) ([datetime]'2026-01-01T00:00:00Z') ([datetime]'2026-01-02T00:00:00Z')
