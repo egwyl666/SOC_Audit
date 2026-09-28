@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.10.0] — 2026-09-28
+
+User activity and USB.
+
+### Added
+- Step **5.11 "Дії користувача та USB"** and report section **13.2**:
+  - **USB storage and portable devices** (`05_artifacts\usb_devices.csv`): USBSTOR (vendor, model, serial, whether the
+    serial is real), WPD devices (phones, players), drive letter from MountedDevices, first install / last arrival /
+    last removal from PnP device properties, first install from `setupapi.dev.log` as a fallback.
+  - **Connections in the window** (`usb_connections.csv`) from Partition/Diagnostic 1006: connect / disconnect,
+    manufacturer, model, serial, size.
+  - **ShellBags** (`shellbags.csv`): folders opened in Explorer, rebuilt into full paths from BagMRU (root folders,
+    drives, folders with long names from the 0xBEEF0004 block, network paths); each path marked as local disk,
+    removable, drive not present now, or network.
+  - **RecentDocs** (`recent_docs.csv`) in MRU order.
+  - **Jump Lists** (`jumplists.csv`): AppID (known ones named), modification time, file and share paths found in
+    the file (no full format parsing — use JLECmd for that).
+- Flags (Середньо): a USB device first connected in the investigation window; IOC mask matches in ShellBags,
+  RecentDocs and Jump Lists (lowered to "Інфо" with `-TestIoc`).
+- Timeline: USB first / last connection and removal, 1006 events.
+- Tests: shell items (root folder, drive, folder with long name, network), path assembly, USBSTOR names, setupapi.dev.log,
+  RecentDocs values, paths in Jump List data, reading the current user's ShellBags on Windows; the smoke run checks
+  the new CSV files and report section.
+
 ## [1.9.2] — 2026-09-28
 
 Accuracy fixes found in the DC01 report, and one chart where it helps.

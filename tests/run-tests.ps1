@@ -29,7 +29,7 @@ $fnAsts = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.F
 foreach ($f in $fnAsts) { . ([scriptblock]::Create($f.Extent.Text)) }
 
 # Верхньорівневі присвоєння, потрібні функціям
-$wantVars = 'Lolbins', 'TaskInterpreters', 'KnownFolderGuids', 'AdReplGuids', 'AdUacCodes', 'AdPrivGroupRx', 'NtStatus', 'LogonTypes'
+$wantVars = 'ShellRootGuids', 'JumpListAppIds', 'Lolbins', 'TaskInterpreters', 'KnownFolderGuids', 'AdReplGuids', 'AdUacCodes', 'AdPrivGroupRx', 'NtStatus', 'LogonTypes'
 foreach ($a in @($ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] })) {
     $left = $a.Left
     if ($left -is [System.Management.Automation.Language.VariableExpressionAst] -and $wantVars -contains $left.VariablePath.UserPath) { . ([scriptblock]::Create($a.Extent.Text)) }
@@ -191,6 +191,10 @@ try {
             Assert-True 'Get-EventIdCount24h: ліміт -> Capped' ((Get-EventIdCount24h 'System' $ids $now -Limit 1).Capped -eq ($direct -ge 1))
         }
         Assert-True 'Get-EventIdCount24h: неіснуючий канал -> null' ($null -eq (Get-EventIdCount24h 'SOC-Collect-No-Such/Log' @(1) $now))
+        $okBags = $true
+        try { $bk = Get-Item -LiteralPath 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\BagMRU' -ErrorAction SilentlyContinue
+              if ($bk) { foreach ($vn in @($bk.GetValueNames() | Where-Object { $_ -match '^\d+$' })) { $null = ConvertFrom-ShellItem ($bk.GetValue($vn)) } } } catch { $okBags = $false }
+        Assert-True 'ShellBags поточного користувача читаються без помилок' $okBags
         $hh = Get-HourlyEventCounts 'System' $now
         $sum = [int64](($hh.Counts | Measure-Object -Sum).Sum)
         Assert-True ("Get-HourlyEventCounts System: сума {0} ≈ Get-LogEvents24h {1}" -f $sum, $e24) ($hh -and [math]::Abs($sum - [int64]$e24) -le 3 -and $hh.Counts.Count -eq 24)
@@ -215,6 +219,34 @@ try {
     Assert-True 'без підпису = Високо'             ((Get-PersistVerdict $true 'NotSigned' '' 'Системний').Severity -eq 'Високо')
     Assert-True 'HashMismatch = Високо'            ((Get-PersistVerdict $true 'HashMismatch' 'Microsoft Windows' 'Системний').Severity -eq 'Високо')
     Assert-True 'файлу немає = Середньо'           ((Get-PersistVerdict $false '' '' '').Status -eq 'Файл відсутній')
+
+    Test-Group 'Дії користувача та USB: розбір (синтетичні байти)'
+    function New-Item16 { param([byte[]]$Body) $len = $Body.Length + 2; return [byte[]](@([byte]($len -band 0xFF), [byte]($len -shr 8)) + $Body) }
+    $root = New-Item16 ([byte[]](@(0x1F, 0x50) + ([guid]'20D04FE0-3AEA-1069-A2D8-08002B30309D').ToByteArray()))
+    $drv = New-Item16 ([byte[]](@(0x2F) + [Text.Encoding]::ASCII.GetBytes("E:\") + (New-Object byte[] 19)))
+    $longName = 'Секретні документи'
+    $ext = [byte[]](@(0, 0, 9, 0, 0x04, 0x00, 0xEF, 0xBE) + (New-Object byte[] 38) + [Text.Encoding]::Unicode.GetBytes($longName) + @(0, 0))
+    $ext[0] = [byte]($ext.Length -band 0xFF); $ext[1] = [byte]($ext.Length -shr 8)
+    $fold = New-Item16 ([byte[]](@(0x31, 0) + (New-Object byte[] 10) + [Text.Encoding]::ASCII.GetBytes("SEKRET~1") + @(0, 0) + $ext))
+    $net = New-Item16 ([byte[]](@(0x41, 0x01, 0x82) + [Text.Encoding]::ASCII.GetBytes('\\srv01\share') + @(0, 0)))
+    $r0 = ConvertFrom-ShellItem $root; $r1 = ConvertFrom-ShellItem $drv; $r2 = ConvertFrom-ShellItem $fold; $r3 = ConvertFrom-ShellItem $net
+    Assert-True 'корінь «Цей комп''ютер» -> Root з порожньою назвою' ($r0.Kind -eq 'Root' -and $r0.Name -eq '')
+    Assert-True 'том E:\'                               ($r1.Kind -eq 'Drive' -and $r1.Name -eq 'E:\')
+    Assert-True 'папка: довге ім''я з блоку 0xBEEF0004'  ($r2.Kind -eq 'Folder' -and $r2.Name -eq $longName)
+    Assert-True 'мережа \\srv01\share'                  ($r3.Kind -eq 'Network' -and $r3.Name -eq '\\srv01\share')
+    Assert-True 'шлях збирається: E:\Секретні документи' ((Join-ShellPath (Join-ShellPath (Join-ShellPath '' $r0) $r1) $r2) -eq "E:\$longName")
+    $foldShort = New-Item16 ([byte[]](@(0x31, 0) + (New-Object byte[] 10) + [Text.Encoding]::ASCII.GetBytes("DOCS") + @(0, 0)))
+    Assert-True 'без блоку розширення — коротке ім''я'  ((ConvertFrom-ShellItem $foldShort).Name -eq 'DOCS')
+    $u = ConvertFrom-UsbstorKey 'Disk&Ven_SanDisk&Prod_Cruzer_Blade&Rev_1.00' '4C530001231224114362&0'
+    Assert-True 'USBSTOR: виробник, модель, серійник'   ($u.Vendor -eq 'SanDisk' -and $u.Product -eq 'Cruzer Blade' -and $u.Serial -eq '4C530001231224114362' -and $u.SerialIsUnique)
+    Assert-True 'USBSTOR: згенерований ID без серійника' (-not (ConvertFrom-UsbstorKey 'Disk&Ven_&Prod_USB_DISK&Rev_' '7&2A5C3B1&0&000000&0').SerialIsUnique)
+    $sa = ConvertFrom-SetupApiLog @('>>>  [Device Install (Hardware initiated) - USBSTOR\Disk&Ven_SanDisk&Prod_Cruzer&Rev_1.00\4C53&0]', '>>>  Section start 2026/09/20 10:11:12.345', '<<<  Section end 2026/09/20 10:11:13.000')
+    Assert-True 'setupapi.dev.log: час першого встановлення' ($sa['USBSTOR\DISK&VEN_SANDISK&PROD_CRUZER&REV_1.00\4C53&0'] -eq [datetime]'2026-09-20 10:11:12')
+    Assert-True 'RecentDocs: ім''я до 00 00'           ((ConvertFrom-RecentDocsValue ([byte[]]([Text.Encoding]::Unicode.GetBytes('звіт.docx') + @(0, 0, 0x14, 0, 0x32)))) -eq 'звіт.docx')
+    $blob = [byte[]]((New-Object byte[] 7) + [Text.Encoding]::Unicode.GetBytes('E:\Документи\план.xlsx') + @(0, 0) + [Text.Encoding]::ASCII.GetBytes('\\srv01\share\a.txt') + @(0))
+    $ep = @(Get-EmbeddedPaths $blob)
+    Assert-True 'Jump List: шляхи з UTF-16 і ANSI'       (($ep -contains 'E:\Документи\план.xlsx') -and ($ep -contains '\\srv01\share\a.txt'))
+    Assert-True 'Jump List: відомий AppID Провідника'    ($JumpListAppIds['f01b4d95cf55d32a'] -like 'Провідник*')
 
     Test-Group 'Погодинний обсяг: прогалини і графік'
     $c = [int[]](@(5, 5, 0, 0, 3) + @(0) * 19)

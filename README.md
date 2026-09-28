@@ -2,7 +2,7 @@
 
 English | [Українська](README.uk.md)
 
-**SOC Live Response Collector v1.9.2** — a single script for evidence collection and first-pass analysis of a Windows host
+**SOC Live Response Collector v1.10.0** — a single script for evidence collection and first-pass analysis of a Windows host
 (replaces the old main audit + `fwlog.ps1` + `filesinter.ps1`). Aligned with **NIST SP 800-86**.
 
 The script collects volatile data, persistence, event logs, `pfirewall.log` and file artifacts, checks security
@@ -224,6 +224,7 @@ The AD steps (2.10, 3.10) turn on automatically when the host is a domain contro
 | **3.10 AD attack signs** (DC only) | Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), privileged group changes, dangerous userAccountControl changes, 5136 (Shadow Credentials, RBCD, GPO, AdminSDHolder and domain-root ACL). First checks whether these events are audited at all |
 | **4. pfirewall.log** | Summary by port and source, ALLOW/DROP, first/last, heuristics (ICMP recon, RDP/WinRM/SSH, SMB/RPC, scanning), IOC IPs |
 | **5.10 Execution traces** | UserAssist (what the user ran, how many times, last run), RunMRU (Win+R commands), ShimCache (files the system has "seen"), Amcache (path + SHA1, with `-CollectHives`). Matched against masks and `-IocSha1` |
+| **5.11 User activity and USB** | USB storage and portable devices (USBSTOR, WPD): vendor, model, serial, drive letter, first / last connection and removal (PnP properties, setupapi.dev.log); connections in the window (Partition/Diagnostic 1006); ShellBags — folders the user opened, including on USB sticks and network shares that are gone; RecentDocs; Jump Lists (paths found in the files). Loaded profiles only for registry data |
 | **5. File artifacts** | Known paths, mask search, LNK (with target), BAM/DAM, Prefetch, Recycle Bin ($I), Zone.Identifier, copies of browser history / Windows Timeline (with `-wal`/`-journal`) / PS history with hint search |
 | **6. Analysis** | Brute-force summary, 4625 ↔ firewall ↔ RDP correlation, IOC matches, automatic flags |
 | **7–9. Report** | Timeline (UTC), HTML, chain of custody, SHA256 manifest, ZIP + hash |
@@ -306,7 +307,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── 03_eventlogs\                ← log extracts; on a DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← original .evtx logs + evtx_export.csv
 ├── 04_firewall\                 ← fw_rules_all.csv (all rules, including disabled), firewall log
-├── 05_artifacts\                ← file artifacts; execution traces: userassist.csv, runmru.csv, shimcache.csv, amcache_files.csv
+├── 05_artifacts\                ← file artifacts; execution traces: userassist.csv, runmru.csv, shimcache.csv, amcache_files.csv; user activity: usb_devices.csv, usb_connections.csv, shellbags.csv, recent_docs.csv, jumplists.csv
 └── 06_evidence_copies\          ← verified copies (browsers, pfirewall.log, hives)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
 ```

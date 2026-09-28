@@ -147,7 +147,7 @@ try {
 $OwnTextNorm = ([string]$OwnTextNorm).Replace("`r", '')
 
 $ToolName    = 'SOC Live Response Collector'
-$ToolVersion = '1.9.2'
+$ToolVersion = '1.10.0'
 $RunStart    = Get-Date
 if (-not $PSBoundParameters.ContainsKey('Since')) { $Since = $RunStart.AddHours(-$Hours) }
 if (-not $PSBoundParameters.ContainsKey('Until')) { $Until = $RunStart }
@@ -223,7 +223,7 @@ $DataKeys = 'TcpRaw','UdpRaw','ProcRaw','Procs','Tcp','Udp','Arp','Dns','IpAddr'
             'LocalUsers','LocalAdmins','Services','Tasks','Autoruns','WmiPersist','MpExclusions','MpStatusRows','Licensing','KmsReg',
             'FwProfiles','FwRules','Ev4625','Ev4624','OtherAuth','LogCleared','Rdp','RdpSummary','SvcEvents','TaskEvents',
             'FwEvents','MpEvents','Exec','SysmonMisc','Ps4104','FwByPort','FwBySource','FwIocRaw','FwSvcHits','KnownFiles',
-            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','UserAssist','RunMru','ShimCache','Amcache','TasksAll','FwRulesAll','PrefetchAll','MpFull','LogInventory','EventVisibility','PersistExt','LogHourly','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
+            'WideHigh','WideLow','WideDirs','LogHealth','Hardening','EvtxExport','AdConfig','AdObjects','AdAudit','AdEvents','AdFindings','UserAssist','RunMru','ShimCache','Amcache','TasksAll','FwRulesAll','PrefetchAll','MpFull','LogInventory','EventVisibility','PersistExt','LogHourly','UsbDevices','UsbConnections','ShellBags','RecentDocs','JumpLists','AuditSettings','Lnk','Bam','Prefetch','Recycle','Zone','Hints','PsHist','BruteForce','Correlation','IocHits'
 foreach ($k in $DataKeys) { $D[$k] = @() }
 
 $Lolbins = @('netsh.exe','wmic.exe','reg.exe','sc.exe','schtasks.exe','cscript.exe','wscript.exe','mshta.exe','rundll32.exe',
@@ -842,6 +842,113 @@ $KnownFolderGuids = @{   # KNOWNFOLDERID, якими UserAssist підміняє
     '{FDD39AD0-238F-46AF-ADB4-6C85480369C7}' = '%UserProfile%\Documents'; '{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}' = '%LocalAppData%'
     '{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}' = '%AppData%'; '{A520A1A4-1780-4FF6-BD18-167343C5AF16}' = '%UserProfile%\AppData\LocalLow'
     '{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}' = '%ProgramData%'; '{5E6C858F-0E22-4760-9AFE-EA3317B67173}' = '%UserProfile%'
+}
+$ShellRootGuids = @{   # корені ShellBags (0x1F) -> читабельна назва
+    '{20D04FE0-3AEA-1069-A2D8-08002B30309D}' = ''; '{59031A47-3F72-44A7-89C5-5595FE6B30EE}' = '%USERPROFILE%'
+    '{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}' = '[Мережа]'; '{645FF040-5081-101B-9F08-00AA002F954E}' = '[Кошик]'
+    '{21EC2020-3AEA-1069-A2DD-08002B30309D}' = '[Панель керування]'; '{26EE0668-A00A-44D7-9371-BEB064C98683}' = '[Панель керування]'
+    '{031E4825-7B94-4DC3-B131-E946B44C8DD5}' = '[Бібліотеки]'; '{679F85CB-0220-4080-B29B-5540CC05AAB6}' = '[Швидкий доступ]'
+    '{018D5C66-4533-4307-9B53-224DE2ED1FE6}' = '%OneDrive%'; '{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}' = '%USERPROFILE%\Desktop'
+    '{374DE290-123F-4565-9164-39C4925E467B}' = '%USERPROFILE%\Downloads'; '{FDD39AD0-238F-46AF-ADB4-6C85480369C7}' = '%USERPROFILE%\Documents'
+}
+$JumpListAppIds = @{   # найвідоміші AppID (перші 16 hex імені файлу *.automaticDestinations-ms)
+    '1b4dd67f29cb1962' = 'Провідник (Windows 7)'; 'f01b4d95cf55d32a' = 'Провідник (Windows 8+)'; '9b9cdc69c1c24e2b' = 'Блокнот (64-біт)'
+    '1bc392b8e104a00e' = 'Підключення до віддаленого робочого столу (mstsc)'; '5d696d521de238c3' = 'Google Chrome'
+}
+function ConvertFrom-ShellItem {   # один shell item (з 2-байтовим розміром на початку) -> Kind, Name; упрощений розбір основних типів
+    param([byte[]]$b)
+    if (-not $b -or $b.Length -lt 3) { return $null }
+    $t = $b[2]
+    if ($t -eq 0x1F -and $b.Length -ge 20) {
+        $g = ([guid][byte[]]$b[4..19]).ToString('B').ToUpperInvariant()
+        $n = $(if ($ShellRootGuids.ContainsKey($g)) { $ShellRootGuids[$g] } else { $g })
+        return [pscustomobject]@{ Kind = 'Root'; Name = $n }
+    }
+    if (($t -band 0x70) -eq 0x20 -and $b.Length -ge 5) {   # 0x2F/0x23/0x25… — том: 'C:\'
+        $s = [Text.Encoding]::ASCII.GetString($b, 3, [math]::Min(20, $b.Length - 3)).Split([char]0)[0]
+        if ($s -match '^[A-Za-z]:\\?$') { return [pscustomobject]@{ Kind = 'Drive'; Name = ($s.Substring(0, 2).ToUpperInvariant() + '\') } }
+    }
+    if (($t -band 0x70) -eq 0x30 -and $b.Length -ge 16) {   # 0x31 папка / 0x32 файл / 0x35-0x36 з Unicode-іменем
+        $uni = (($t -band 0x04) -ne 0)
+        $short = ''
+        if ($uni) { $short = [Text.Encoding]::Unicode.GetString($b, 14, $b.Length - 14).Split([char]0)[0] }
+        else { $short = [Text.Encoding]::Default.GetString($b, 14, $b.Length - 14).Split([char]0)[0] }
+        $long = ''
+        for ($i = 14; $i -le $b.Length - 4; $i++) {   # блок розширення 0xBEEF0004: довге ім'я
+            if ($b[$i] -eq 0x04 -and $b[$i + 1] -eq 0x00 -and $b[$i + 2] -eq 0xEF -and $b[$i + 3] -eq 0xBE -and $i -ge 4) {
+                $bs = $i - 4; $ver = [BitConverter]::ToUInt16($b, $bs + 2)
+                $off = $(if ($ver -ge 9) { 46 } elseif ($ver -ge 8) { 42 } elseif ($ver -ge 7) { 38 } else { 20 })
+                if ($bs + $off -lt $b.Length - 1) { $long = [Text.Encoding]::Unicode.GetString($b, $bs + $off, $b.Length - $bs - $off).Split([char]0)[0] }
+                break
+            }
+        }
+        $name = $(if ($long -and $long -notmatch '[\x00-\x1F]') { $long } else { $short })
+        return [pscustomobject]@{ Kind = $(if (($t -band 0x02) -ne 0 -and ($t -band 0x01) -eq 0) { 'File' } else { 'Folder' }); Name = $name }
+    }
+    if (($t -band 0x70) -eq 0x40 -and $b.Length -ge 6) {   # мережеве розташування: \\server\share
+        $s = [Text.Encoding]::Default.GetString($b, 5, $b.Length - 5).Split([char]0)[0]
+        if ($s) { return [pscustomobject]@{ Kind = 'Network'; Name = $s } }
+    }
+    return [pscustomobject]@{ Kind = 'Other'; Name = ('[тип 0x{0:X2}]' -f $t) }
+}
+function Join-ShellPath {   # батьківський шлях + елемент ShellBags
+    param([string]$Parent, $Item)
+    if (-not $Item) { return $Parent }
+    switch ($Item.Kind) {
+        'Root'    { return $Item.Name }
+        'Drive'   { return $Item.Name }
+        'Network' { return $Item.Name }
+        default {
+            if (-not $Parent) { return $Item.Name }
+            if ($Parent.EndsWith('\')) { return $Parent + $Item.Name }
+            return $Parent + '\' + $Item.Name
+        }
+    }
+}
+function ConvertFrom-UsbstorKey {   # 'Disk&Ven_SanDisk&Prod_Cruzer&Rev_1.00' + '4C53000123&0' -> Vendor, Product, Rev, Serial
+    param([string]$Class, [string]$Instance)
+    $v = ''; $p = ''; $r = ''
+    if ($Class -match '(?i)Ven_([^&]*)') { $v = $Matches[1] -replace '_', ' ' }
+    if ($Class -match '(?i)Prod_([^&]*)') { $p = $Matches[1] -replace '_', ' ' }
+    if ($Class -match '(?i)Rev_([^&]*)') { $r = $Matches[1] }
+    $ser = $Instance; $unique = $true
+    if ($Instance -match '^(.*)&\d+$') { $ser = $Matches[1] }
+    if ($ser.Length -ge 2 -and $ser[1] -eq '&') { $unique = $false }   # другий символ '&' — Windows згенерувала ID, серійника немає
+    return [pscustomobject]@{ Vendor = $v.Trim(); Product = $p.Trim(); Revision = $r; Serial = $ser; SerialIsUnique = $unique }
+}
+function ConvertFrom-SetupApiLog {   # рядки setupapi.dev.log -> @{ 'USBSTOR\...' = [datetime] першого встановлення }
+    param([string[]]$Lines)
+    $res = @{}; $pending = $null
+    foreach ($l in $Lines) {
+        if ($l -match '^>>>\s+\[Device Install.*?-\s+((?:USBSTOR|SWD\\WPDBUSENUM|USB)\\[^\]]+)\]') { $pending = $Matches[1].ToUpperInvariant(); continue }
+        if ($pending -and $l -match '^>>>\s+Section start (\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})') {
+            $t = [datetime]::ParseExact($Matches[1], 'yyyy/MM/dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+            if (-not $res.ContainsKey($pending)) { $res[$pending] = $t }
+            $pending = $null
+        }
+    }
+    return $res
+}
+function ConvertFrom-RecentDocsValue {   # значення RecentDocs: UTF-16 ім'я файлу до першого 00 00
+    param([byte[]]$b)
+    if (-not $b -or $b.Length -lt 4) { return '' }
+    for ($i = 0; $i -le $b.Length - 2; $i += 2) { if ($b[$i] -eq 0 -and $b[$i + 1] -eq 0) { return [Text.Encoding]::Unicode.GetString($b, 0, $i) } }
+    return [Text.Encoding]::Unicode.GetString($b)
+}
+function Get-EmbeddedPaths {   # шляхи 'X:\...' та '\\server\share\...' у двійкових даних (UTF-16 і ANSI) — для Jump Lists
+    param([byte[]]$b, [int]$Max = 200)
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $rx = New-Object Text.RegularExpressions.Regex '(?:[A-Za-z]:\\|\\\\[\w.$-]+\\)[^\x00-\x1F"*?<>|]{2,259}'
+    $texts = @([Text.Encoding]::Unicode.GetString($b), [Text.Encoding]::Default.GetString($b))
+    if ($b.Length -gt 1) { $texts += [Text.Encoding]::Unicode.GetString($b, 1, $b.Length - 1) }   # UTF-16 на непарному зміщенні
+    foreach ($txt in $texts) {
+        foreach ($m in $rx.Matches($txt)) {
+            $v = $m.Value.TrimEnd(' ', '.')
+            if ($v.Length -ge 5 -and $v -notmatch '[^\x20-\x7E\u0400-\u04FF\u00A0-\u024F]') { [void]$set.Add($v) }
+            if ($set.Count -ge $Max) { break }
+        }
+    }
+    return @($set)
 }
 function Resolve-KnownFolderPath {
     param([string]$p)
@@ -2996,6 +3103,149 @@ Invoke-Step "5.10 Сліди запуску: UserAssist, RunMRU (Win+R), ShimCac
     Save-Csv $D.Amcache '05_artifacts\amcache_files.csv'
 }
 
+# ════════════════════════════════════ 5.11 ДІЇ КОРИСТУВАЧА ТА USB ════════════════════════════════════
+# Які знімні носії підключались і що користувач відкривав (папки, документи) — зокрема на флешках і мережевих шарах,
+# яких уже немає. Лише читання; профілі — ті, чий куш завантажено (як у 5.10).
+Invoke-Step "5.11 Дії користувача та USB: USB-носії, ShellBags, RecentDocs, Jump Lists" {
+    # ── USB-накопичувачі (USBSTOR) і телефони / плеєри (WPD) ──
+    $usb = New-Object System.Collections.Generic.List[object]
+    $setup = @{}
+    $sal = Join-Path $env:SystemRoot 'INF\setupapi.dev.log'
+    if (Test-Path -LiteralPath $sal) { try { $setup = ConvertFrom-SetupApiLog @(Get-Content -LiteralPath $sal -ErrorAction Stop) } catch {} }
+    $mounted = @{}   # серійник/ID пристрою -> літера диска
+    $md = Get-Item -LiteralPath 'HKLM:\SYSTEM\MountedDevices' -ErrorAction SilentlyContinue
+    if ($md) {
+        foreach ($vn in @($md.GetValueNames() | Where-Object { $_ -match '^\\DosDevices\\[A-Z]:$' })) {
+            $val = $md.GetValue($vn)
+            if ($val -is [byte[]] -and $val.Length -gt 24) { $txt = [Text.Encoding]::Unicode.GetString($val); if ($txt -match '(?i)USBSTOR#[^#]+#([^#]+)#') { $mounted[$Matches[1].ToUpperInvariant()] = $vn.Substring(12) } }
+        }
+    }
+    $propNames = @('DEVPKEY_Device_FirstInstallDate', 'DEVPKEY_Device_LastArrivalDate', 'DEVPKEY_Device_LastRemovalDate')
+    $pnpOk = [bool](Get-Command Get-PnpDeviceProperty -ErrorAction SilentlyContinue)
+    function Get-DevTimes { param([string]$InstanceId)
+        $r = @{ First = $null; Arrival = $null; Removal = $null }
+        if ($pnpOk) {
+            foreach ($p in @(Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName $propNames -ErrorAction SilentlyContinue)) {
+                if ($p.Data -is [datetime]) { switch ($p.KeyName) { 'DEVPKEY_Device_FirstInstallDate' { $r.First = $p.Data } 'DEVPKEY_Device_LastArrivalDate' { $r.Arrival = $p.Data } 'DEVPKEY_Device_LastRemovalDate' { $r.Removal = $p.Data } } }
+            }
+        }
+        if (-not $r.First -and $setup.ContainsKey($InstanceId.ToUpperInvariant())) { $r.First = $setup[$InstanceId.ToUpperInvariant()] }
+        return $r
+    }
+    foreach ($cls in @(Get-ChildItem -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Enum\USBSTOR' -ErrorAction SilentlyContinue)) {
+        foreach ($inst in @(Get-ChildItem -LiteralPath $cls.PSPath -ErrorAction SilentlyContinue)) {
+            $info = ConvertFrom-UsbstorKey $cls.PSChildName $inst.PSChildName
+            $iid = "USBSTOR\$($cls.PSChildName)\$($inst.PSChildName)"
+            $tm = Get-DevTimes $iid
+            $fn = [string](Get-ItemProperty -LiteralPath $inst.PSPath -Name FriendlyName -ErrorAction SilentlyContinue).FriendlyName
+            $usb.Add([pscustomobject]@{ Type = 'Накопичувач (USBSTOR)'; Name = $(if ($fn) { $fn } else { ("{0} {1}" -f $info.Vendor, $info.Product).Trim() }); Vendor = $info.Vendor; Product = $info.Product
+                Serial = $info.Serial; SerialIsUnique = $info.SerialIsUnique; DriveLetter = $(if ($mounted.ContainsKey($inst.PSChildName.ToUpperInvariant())) { $mounted[$inst.PSChildName.ToUpperInvariant()] } else { '' })
+                FirstInstallUtc = (U $tm.First); LastArrivalUtc = (U $tm.Arrival); LastRemovalUtc = (U $tm.Removal)
+                FirstInWindow = [bool]($tm.First -and $tm.First -ge $Since -and $tm.First -le $Until); InstanceId = $iid })
+        }
+    }
+    if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
+        foreach ($dv in @(Get-PnpDevice -Class WPD -ErrorAction SilentlyContinue)) {
+            $tm = Get-DevTimes $dv.InstanceId
+            $usb.Add([pscustomobject]@{ Type = 'Портативний пристрій (WPD: телефон, плеєр)'; Name = $dv.FriendlyName; Vendor = [string]$dv.Manufacturer; Product = ''
+                Serial = ''; SerialIsUnique = $false; DriveLetter = ''; FirstInstallUtc = (U $tm.First); LastArrivalUtc = (U $tm.Arrival); LastRemovalUtc = (U $tm.Removal)
+                FirstInWindow = [bool]($tm.First -and $tm.First -ge $Since -and $tm.First -le $Until); InstanceId = $dv.InstanceId })
+        }
+    }
+    if (-not $pnpOk) { Add-Note 'USB: Get-PnpDeviceProperty недоступний — час першого підключення взято з setupapi.dev.log, час останнього підключення / відключення невідомий.' }
+    $D.UsbDevices = Arr ($usb | Sort-Object @{ Expression = { $_.LastArrivalUtc }; Descending = $true })
+    Save-Csv $D.UsbDevices '05_artifacts\usb_devices.csv'
+
+    # Підключення / відключення носіїв за вікно (Partition/Diagnostic 1006: Capacity = 0 — відключення)
+    $conn = foreach ($e in (Get-Ev 'Microsoft-Windows-Partition/Diagnostic' @(1006))) {
+        $evd = Get-EvData $e
+        $cap = 0; [void][int64]::TryParse([string]$evd['Capacity'], [ref]$cap)
+        [pscustomobject]@{ TimeUtc = (U $e.TimeCreated); TimeLocal = (L $e.TimeCreated); Action = $(if ($cap -gt 0) { 'Підключення' } else { 'Відключення' })
+            Manufacturer = ([string]$evd['Manufacturer']).Trim(); Model = ([string]$evd['Model']).Trim(); Serial = ([string]$evd['SerialNumber']).Trim()
+            SizeGB = $(if ($cap -gt 0) { [math]::Round($cap / 1GB, 1) } else { '' }); BusType = [string]$evd['BusType'] }
+    }
+    $D.UsbConnections = Arr ($conn | Sort-Object TimeUtc)
+    Save-Csv $D.UsbConnections '05_artifacts\usb_connections.csv'
+
+    # ── ShellBags / RecentDocs / Jump Lists по завантажених профілях ──
+    $removable = @(Get-CimInstance Win32_LogicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 2 } | ForEach-Object { $_.DeviceID.ToUpperInvariant() })
+    $present = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object { ($_.Name + ':').ToUpperInvariant() })
+    $usbLetters = @($usb | Where-Object { $_.DriveLetter } | ForEach-Object { $_.DriveLetter.ToUpperInvariant() })
+    function Get-PathPlace { param([string]$p)
+        if ($p -like '\\*') { return 'Мережа' }
+        if ($p -match '^([A-Za-z]:)') {
+            $dl = $Matches[1].ToUpperInvariant()
+            if ($removable -contains $dl -or $usbLetters -contains $dl) { return 'Знімний носій' }
+            if ($present -notcontains $dl) { return 'Диска зараз немає (можливо, знімний)' }
+            return 'Локальний диск'
+        }
+        return ''
+    }
+    $bags = New-Object System.Collections.Generic.List[object]
+    $recent = New-Object System.Collections.Generic.List[object]
+    $jl = New-Object System.Collections.Generic.List[object]
+    $loaded = @(Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^S-1-5-21-[\d-]+$' })
+    foreach ($h in $loaded) {
+        $sid = $h.PSChildName; $user = Resolve-Sid $sid
+        $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($root in @("Registry::HKEY_USERS\${sid}_Classes\Local Settings\Software\Microsoft\Windows\Shell\BagMRU", "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\Shell\BagMRU")) {
+            $stack = New-Object System.Collections.Generic.Stack[object]
+            $rk = Get-Item -LiteralPath $root -ErrorAction SilentlyContinue
+            if ($rk) { $stack.Push(@($rk, '', 0)) }
+            $guard = 0
+            while ($stack.Count -and $guard -lt 20000) {
+                $guard++
+                $cur = $stack.Pop(); $k = $cur[0]; $prefix = $cur[1]; $depth = $cur[2]
+                foreach ($vn in @($k.GetValueNames() | Where-Object { $_ -match '^\d+$' })) {
+                    $data = $k.GetValue($vn); if (-not ($data -is [byte[]])) { continue }
+                    $it = ConvertFrom-ShellItem $data
+                    $path = Join-ShellPath $prefix $it
+                    if ($path -and $seen.Add($path) -and $it.Kind -ne 'Root') {
+                        $bags.Add([pscustomobject]@{ Profile = $user; Path = $path; ItemType = $it.Kind; Place = (Get-PathPlace $path); Match = (Test-KwMatch $path) })
+                    }
+                    if ($depth -lt 40) { $sk = Get-Item -LiteralPath (Join-Path $k.PSPath $vn) -ErrorAction SilentlyContinue; if ($sk) { $stack.Push(@($sk, $path, ($depth + 1))) } }
+                }
+            }
+        }
+        $rdBase = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs"
+        $rd = Get-Item -LiteralPath $rdBase -ErrorAction SilentlyContinue
+        if ($rd) {
+            $order = @(); $mx = $rd.GetValue('MRUListEx')
+            if ($mx -is [byte[]]) { for ($i = 0; $i + 3 -lt $mx.Length; $i += 4) { $n = [BitConverter]::ToInt32($mx, $i); if ($n -lt 0) { break }; $order += $n } }
+            $pos = 0
+            foreach ($n in $order) {
+                $name = ConvertFrom-RecentDocsValue ($rd.GetValue([string]$n))
+                if ($name) { $recent.Add([pscustomobject]@{ Profile = $user; Order = $pos; Name = $name; Extension = [IO.Path]::GetExtension($name); Match = (Test-KwMatch $name) }) }
+                $pos++
+            }
+        }
+    }
+    foreach ($p in @($D.Profiles | Where-Object { $_.Exists })) {
+        foreach ($sub in 'AutomaticDestinations', 'CustomDestinations') {
+            $dir = Join-Path $p.Path "AppData\Roaming\Microsoft\Windows\Recent\$sub"
+            foreach ($f in @(Get-ChildItem -LiteralPath $dir -File -Force -ErrorAction SilentlyContinue)) {
+                $appId = ($f.BaseName -split '\.')[0].ToLowerInvariant()
+                $paths = @()
+                if ($f.Length -gt 0 -and $f.Length -le 20MB) { try { $paths = @(Get-EmbeddedPaths ([IO.File]::ReadAllBytes($f.FullName))) } catch {} }
+                $pathTxt = ($paths -join ' | ')
+                $jl.Add([pscustomobject]@{ Profile = $p.User; Kind = $(if ($sub -like 'Auto*') { 'Automatic' } else { 'Custom' }); AppId = $appId
+                    Application = $(if ($JumpListAppIds.ContainsKey($appId)) { $JumpListAppIds[$appId] } else { '' }); ModifiedUtc = (U $f.LastWriteTimeUtc); Items = $paths.Count
+                    Paths = $(if ($pathTxt.Length -gt 3000) { $pathTxt.Substring(0, 3000) + ' …' } else { $pathTxt })
+                    Removable = [bool](@($paths | Where-Object { (Get-PathPlace $_) -in 'Знімний носій', 'Диска зараз немає (можливо, знімний)', 'Мережа' }).Count)
+                    Match = (Test-KwMatch $pathTxt); File = $f.FullName })
+            }
+        }
+    }
+    $allProfiles = @($D.Profiles | Where-Object { $_.Exists }).Count
+    if ($allProfiles -gt $loaded.Count) { Add-Note ("ShellBags / RecentDocs: прочитано {0} з {1} профілів — лише тих, чий куш завантажено (користувач увійшов). Jump Lists — з усіх профілів (це файли)." -f $loaded.Count, $allProfiles) }
+    $D.ShellBags = Arr ($bags | Sort-Object @{ Expression = { -not $_.Match } }, @{ Expression = { $_.Place -eq 'Локальний диск' -or -not $_.Place } }, Profile, Path)
+    $D.RecentDocs = Arr $recent
+    $D.JumpLists = Arr ($jl | Sort-Object @{ Expression = { -not $_.Match } }, @{ Expression = { $_.ModifiedUtc }; Descending = $true })
+    Save-Csv $D.ShellBags '05_artifacts\shellbags.csv'
+    Save-Csv $D.RecentDocs '05_artifacts\recent_docs.csv'
+    Save-Csv $D.JumpLists '05_artifacts\jumplists.csv'
+}
+
 # ════════════════════════════════════ 6. АНАЛІЗ ════════════════════════════════════
 Invoke-Step "6.1 Brute-force: зведення 4625 (ціль, джерело, кількість, перша/остання спроба)" {
     $bf = @($D.Ev4625) | Group-Object -Property TargetUser, SourceIP, Workstation, LogonType, CallerProcess | ForEach-Object {
@@ -3146,6 +3396,10 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     }
     # Аудит зараз вимкнено, а події цієї категорії за добу є: політику аудиту змінили нещодавно (T1562.002?)
     foreach ($v in @($D.EventVisibility | Where-Object { $_.AuditChanged })) { Add-Flag 'Середньо' 'Журнали' ("Аудит вимкнено, але за добу є події: {0} ({1})" -f $v.Category, $v.EventIds) $v.Comment 'logs' }
+    foreach ($u in @($D.UsbDevices | Where-Object { $_.FirstInWindow })) { Add-Flag 'Середньо' 'USB' ("Новий USB-пристрій у вікні: {0}" -f $u.Name) ("{0}; серійник {1}; перше підключення {2}; буква {3}" -f $u.Type, $(if ($u.Serial) { $u.Serial } else { '—' }), $u.FirstInstallUtc, $(if ($u.DriveLetter) { $u.DriveLetter } else { '—' })) 'user' }
+    foreach ($r in @($D.ShellBags | Where-Object { $_.Match })) { Add-Flag 'Середньо' 'Дії користувача' ("ShellBags: {0}" -f $r.Path) ("{0}; {1}" -f $r.Profile, $r.Place) 'user' }
+    foreach ($r in @($D.RecentDocs | Where-Object { $_.Match })) { Add-Flag 'Середньо' 'Дії користувача' ("RecentDocs: {0}" -f $r.Name) ("{0}; позиція в MRU {1}" -f $r.Profile, $r.Order) 'user' }
+    foreach ($r in @($D.JumpLists | Where-Object { $_.Match })) { Add-Flag 'Середньо' 'Дії користувача' ("Jump List: {0}" -f $(if ($r.Application) { $r.Application } else { $r.AppId })) ("{0}; змінено {1}; {2}" -f $r.Profile, $r.ModifiedUtc, $r.Paths) 'user' }
     $badAud = @($D.AuditSettings | Where-Object { $_.OK -eq $false })
     if ($badAud.Count) { Add-Flag 'Середньо' 'Аудит' ("Налаштування аудиту нижче рекомендованих: {0}" -f $badAud.Count) ((@($badAud | ForEach-Object { $_.Setting }) -join '; ')) 'system' }
     if ($D.PrefetchState -like '0*') { Add-Flag 'Інфо' 'Методологія' 'Prefetch вимкнено' 'Відсутність .pf — очікувана, не доказ відсутності запуску' 'integrity' }
@@ -3154,7 +3408,7 @@ Invoke-Step "6.4 Автоматичні прапорці (підказки дл�
     foreach ($n in @($Notes | Where-Object { $_ -like 'УВАГА*' })) { Add-Flag 'Середньо' 'Повнота даних' 'Вибірку журналу урізано лімітом -MaxEvents' $n 'integrity' }
     # Тестові IOC: прапорці, єдина підстава яких — збіг з маскою імені, знижуємо до «Інфо» (IOC-hash / IOC IP не чіпаємо)
     if ($UsingDefaultIoc) {
-        $maskTitles = '^(LNK на IOC|BAM: запуск|Видалено в кошик|Завантажено з інтернету|Згадки IOC в історії|UserAssist: |ShimCache: |Amcache: )'
+        $maskTitles = '^(LNK на IOC|BAM: запуск|Видалено в кошик|Завантажено з інтернету|Згадки IOC в історії|UserAssist: |ShimCache: |Amcache: |ShellBags: |RecentDocs: |Jump List: )'
         foreach ($f in $Flags) {
             if ($f.Severity -ne 'Середньо') { continue }
             if ([string]$f.Evidence -match ' — Збіг з маскою IOC$' -or [string]$f.Finding -match $maskTitles) {
@@ -3179,6 +3433,13 @@ Invoke-Step "7.1 Єдиний timeline з усіх джерел" {
     foreach ($r in @($D.Exec)) { $m = ''; if ($r.Reason -match 'IOC|Підозрілі') { $m = 'bad' }; Add-TL $r.TimeUtc $r.Source 'Запуск' ("{0}  ← {1}" -f $r.CommandLine, $r.Parent) $r.User $m }
     foreach ($r in @($D.SysmonMisc)) { Add-TL $r.TimeUtc 'Sysmon' $r.EventId ("{0}: {1} ({2})" -f $r.Reason, $r.Target, $r.Image) $r.User 'warn' }
     foreach ($r in @($D.Ps4104)) { Add-TL $r.TimeUtc 'PowerShell' '4104' $r.Snippet '' 'warn' }
+    foreach ($u in @($D.UsbDevices)) {
+        $m = ''; if ($u.FirstInWindow) { $m = 'warn' }
+        Add-TL $u.FirstInstallUtc 'USB' 'Перше підключення' ("{0} ({1})" -f $u.Name, $u.Serial) '' $m
+        Add-TL $u.LastArrivalUtc 'USB' 'Останнє підключення' ("{0} ({1})" -f $u.Name, $u.Serial) ''
+        Add-TL $u.LastRemovalUtc 'USB' 'Останнє відключення' ("{0} ({1})" -f $u.Name, $u.Serial) ''
+    }
+    foreach ($c in @($D.UsbConnections)) { Add-TL $c.TimeUtc 'Partition 1006' $c.Action ("{0} {1} ({2}) {3} GB" -f $c.Manufacturer, $c.Model, $c.Serial, $c.SizeGB) '' }
     foreach ($r in @($D.UserAssist | Where-Object { $_.Match })) { Add-TL $r.LastRunUtc 'UserAssist' 'LastRun' ("{0} (запусків: {1})" -f $r.Program, $r.RunCount) $r.Profile 'warn' }
     foreach ($r in @($D.ShimCache | Where-Object { $_.Match })) { Add-TL $r.LastModifiedUtc 'ShimCache' 'FileModified' ("Дата зміни файлу (не запуску): {0}" -f $r.Path) '' '' }
     foreach ($r in @($D.AdEvents | Where-Object { $_.Severity -ne 'Інфо' })) { Add-TL $r.TimeUtc 'Active Directory' ([string]$r.EventId) ("{0}: {1} {2} {3}" -f $r.Technique, $r.Target, $r.SourceIP, $r.Details) $r.Actor $(if ($r.Severity -in 'Критично', 'Високо') { 'bad' } else { 'warn' }) }
@@ -3488,6 +3749,16 @@ Invoke-Step "8. Формування HTML-звіту" {
          (H3 'Amcache — файли, що були на диску / запускались (шлях, SHA1)' 'Лише з -CollectHives. SHA1 можна шукати у VirusTotal і порівнювати з -IocSha1.') +
          (HT $D.Amcache -Cols @('Path', 'SHA1', 'Publisher', 'Version', 'LinkDate', 'Match', 'IocSha1') -RowClass { param($r) if ($r.IocSha1 -or $r.Match) { 'bad' } } -Csv '05_artifacts\amcache_files.csv' -Empty 'Amcache не розбирався (потрібен -CollectHives).')
     [void]$S.Append((Sec 'traces' '13.1 Сліди запуску (UserAssist, RunMRU, ShimCache, Amcache)' $b -Count (@($D.UserAssist | Where-Object { $_.Match }).Count + @($D.RunMru | Where-Object { $_.Reason -or $_.Match }).Count + @($D.ShimCache | Where-Object { $_.Match }).Count + @($D.Amcache | Where-Object { $_.Match -or $_.IocSha1 }).Count)))
+    $rcUser = { param($r) if ($r.Match) { 'bad' } elseif ($r.FirstInWindow -or $r.Removable -or $r.Place -in 'Знімний носій', 'Диска зараз немає (можливо, знімний)', 'Мережа') { 'warn' } }
+    $b = (H3 'USB-накопичувачі та портативні пристрої' 'З реєстру (USBSTOR, MountedDevices), властивостей PnP і setupapi.dev.log. Час — UTC; жовтим — уперше підключені у вікні розслідування.') +
+         (HT $D.UsbDevices -Cols @('Type', 'Name', 'Serial', 'DriveLetter', 'FirstInstallUtc', 'LastArrivalUtc', 'LastRemovalUtc', 'FirstInWindow') -Csv '05_artifacts\usb_devices.csv' -RowClass $rcUser -Empty 'USB-накопичувачів не знайдено.') +
+         (H3 'Підключення носіїв у вікні (Partition/Diagnostic 1006)') + (HT $D.UsbConnections -Csv '05_artifacts\usb_connections.csv' -Empty 'Подій підключення носіїв у вікні немає (або канал вимкнено).') +
+         (H3 'ShellBags — папки, які відкривав користувач' 'Зокрема на флешках і мережевих шарах, яких уже немає. Знімні й мережеві — жовтим, збіги з IOC — червоним. Час відкриття не показано: .NET не читає час запису ключа реєстру.') +
+         (HT $D.ShellBags -Cols @('Profile', 'Path', 'ItemType', 'Place', 'Match') -Csv '05_artifacts\shellbags.csv' -RowClass $rcUser -Empty 'ShellBags не знайдено (профілі не завантажено або записів немає).') +
+         (H3 'RecentDocs — нещодавно відкриті файли' 'Порядок — від найновішого (MRUListEx).') + (HT $D.RecentDocs -Csv '05_artifacts\recent_docs.csv' -RowClass $rcUser -Empty 'Записів RecentDocs немає.') +
+         (H3 'Jump Lists — файли, відкриті через програми' 'Шляхи знайдено пошуком рядків у файлах Jump List (без повного розбору формату). Для повного розбору — JLECmd (Eric Zimmerman).') +
+         (HT $D.JumpLists -Cols @('Profile', 'Kind', 'Application', 'AppId', 'ModifiedUtc', 'Items', 'Paths', 'Removable', 'Match') -Csv '05_artifacts\jumplists.csv' -RowClass $rcUser -Empty 'Jump Lists не знайдено.')
+    [void]$S.Append((Sec 'user' '13.2 Дії користувача та USB (USB, ShellBags, RecentDocs, Jump Lists)' $b -Count (@($D.UsbDevices | Where-Object { $_.FirstInWindow }).Count + @($D.ShellBags | Where-Object { $_.Match }).Count + @($D.RecentDocs | Where-Object { $_.Match }).Count + @($D.JumpLists | Where-Object { $_.Match }).Count)))
 
     $b = (H3 'IOC-збіги') + (HT $D.IocHits -Csv 'ioc_hits.csv' -RowClass { 'bad' } -Empty 'IOC-збігів не знайдено.')
     [void]$S.Append((Sec 'ioc' '14. IOC-збіги' $b -Count @($D.IocHits).Count))
@@ -3548,7 +3819,7 @@ r.sort(function(x,y){var a=x.cells[i].innerText,c=y.cells[i].innerText,sa=a.repl
 '@
      $navItems = @(@('summary', 'Огляд і прапорці'), @('logs', 'Стабільність логів'), @('integrity', 'Цілісність / NIST'), @('volatile', 'Волатильні дані'), @('system', 'Система'), @('hardening', 'Налаштування безпеки'), @('auth', 'Автентифікація'), @('ad', 'Active Directory'),
                   @('rdp', 'RDP'), @('services', 'Служби'), @('tasks', 'Задачі'), @('persist', 'Персистентність'), @('firewall', 'Firewall'), @('defender', 'Defender'),
-                  @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('traces', 'Сліди запуску'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
+                  @('kms', 'Ліцензування / KMS'), @('exec', 'Виконання'), @('traces', 'Сліди запуску'), @('user', 'Дії користувача / USB'), @('ioc', 'IOC-збіги'), @('files', 'Файлові артефакти'), @('timeline', 'Timeline'), @('custody', 'Chain of custody'))
     $nav = (@($navItems | ForEach-Object { "<a href='#$($_[0])'>$(E $_[1])</a>" }) -join '')
     $iocBanner = ''
     if ($UsingDefaultIoc) { $iocBanner = "<div class='banner'><b>Використано тестові IOC (кейс KMSAuto, -TestIoc).</b> Прапорці лише за збігом з маскою знижено до «Інфо» і позначено «[тестова маска]». Для розслідування запустіть з IOC своєї справи.</div>" }
