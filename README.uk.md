@@ -2,7 +2,7 @@
 
 [English](README.md) | Українська
 
-**SOC Live Response Collector v1.9.2** — один скрипт збору доказів і первинного аналізу Windows-хоста
+**SOC Live Response Collector v1.10.0** — один скрипт збору доказів і первинного аналізу Windows-хоста
 (замінює основний аудит + `fwlog.ps1` + `filesinter.ps1`). Узгоджено з **NIST SP 800-86**.
 
 Скрипт збирає волатильні дані, персистентність, журнали подій, `pfirewall.log` і файлові артефакти, перевіряє
@@ -222,6 +222,7 @@ Invoke-Command -ComputerName PC-17 -FilePath C:\1\soc-collect.ps1 -ArgumentList 
 | **3.10 AD: ознаки атак** (лише DC) | Kerberoasting (4769 RC4), AS-REP roasting (4768), Kerberos spraying (4771), DCSync (4662), зміни привілейованих груп, небезпечні зміни userAccountControl, 5136 (Shadow Credentials, RBCD, GPO, ACL AdminSDHolder і кореня домену). Спершу — перевірка, чи ці події взагалі аудитуються |
 | **4. pfirewall.log** | Зведення по портах і джерелах, ALLOW/DROP, first/last, евристики (ICMP-розвідка, RDP/WinRM/SSH, SMB/RPC, сканування), IOC IP |
 | **5.10 Сліди запуску** | UserAssist (що і скільки разів запускав користувач, коли востаннє), RunMRU (команди Win+R), ShimCache (файли, які система «бачила»), Amcache (шлях + SHA1, з `-CollectHives`). Звірка з масками та `-IocSha1` |
+| **5.11 Дії користувача та USB** | USB-накопичувачі й портативні пристрої (USBSTOR, WPD): виробник, модель, серійник, літера диска, перше / останнє підключення і відключення (властивості PnP, setupapi.dev.log); підключення у вікні (Partition/Diagnostic 1006); ShellBags — папки, які відкривав користувач, зокрема на флешках і мережевих шарах, яких уже немає; RecentDocs; Jump Lists (шляхи, знайдені у файлах). Дані реєстру — лише для завантажених профілів |
 | **5. Файлові артефакти** | Відомі шляхи, пошук за масками, LNK (з ціллю), BAM/DAM, Prefetch, кошик ($I), Zone.Identifier, копії історії браузерів / Windows Timeline (разом з `-wal`/`-journal`) / PS history з пошуком підказок |
 | **6. Аналіз** | Зведення brute-force, кореляція 4625 ↔ firewall ↔ RDP, IOC-збіги, автоматичні прапорці |
 | **7–9. Звіт** | Timeline (UTC), HTML, chain of custody, маніфест SHA256, ZIP + hash |
@@ -302,7 +303,7 @@ C:\SOC_Evidence\<CaseId>_<HOST>_<yyyyMMdd_HHmmss>Z\
 ├── 03_eventlogs\                ← вибірки журналів; на DC — ad_attack_findings.csv, ad_attack_events.csv, ad_audit_coverage.csv
 │   └── evtx\                    ← оригінальні журнали .evtx + evtx_export.csv
 ├── 04_firewall\                 ← fw_rules_all.csv (усі правила, включно з вимкненими), журнал firewall
-├── 05_artifacts\                ← файлові артефакти; сліди запуску: userassist.csv, runmru.csv, shimcache.csv, amcache_files.csv
+├── 05_artifacts\                ← файлові артефакти; сліди запуску: userassist.csv, runmru.csv, shimcache.csv, amcache_files.csv; дії користувача: usb_devices.csv, usb_connections.csv, shellbags.csv, recent_docs.csv, jumplists.csv
 └── 06_evidence_copies\          ← верифіковані копії (браузери, pfirewall.log, кущі)
 <CaseDir>.zip  +  <CaseDir>.zip.sha256
 ```

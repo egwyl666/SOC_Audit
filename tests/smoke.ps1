@@ -40,6 +40,8 @@ if ($hr.Count -lt 24) { $fail += "eventlog_hourly.csv: лише $($hr.Count) р�
 $rep = Get-Content -LiteralPath (Join-Path $case.FullName 'report.html') -Raw
 if ($rep -notmatch "<svg class='hourly'") { $fail += 'у звіті немає графіка подій по годинах' }
 if ($rep -match '1999-11-(29|30)') { $fail += 'у звіті лишилася службова дата задач 1999-11-30' }
+foreach ($f in 'usb_devices.csv', 'usb_connections.csv', 'shellbags.csv', 'recent_docs.csv', 'jumplists.csv') { if (-not (Test-Path -LiteralPath (Join-Path $case.FullName "05_artifacts\$f"))) { $fail += "немає 05_artifacts\$f" } }
+if ($rep -notmatch "id='user'") { $fail += 'у звіті немає розділу 13.2 (Дії користувача та USB)' }
 Write-Host '--- Розширена персистентність'
 $pe | Format-Table Category, Name, Status, Severity, Signer -AutoSize | Out-String -Width 220 | Write-Host
 Write-Host '--- Видимість за категоріями подій'
